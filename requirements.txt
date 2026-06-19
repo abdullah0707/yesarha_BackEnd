@@ -1,12 +1,29 @@
+# Core Framework
 fastapi
 uvicorn[standard]
 sqlalchemy
 psycopg2-binary
 pydantic[email]
 pydantic-settings
+
+# Auth
 python-jose[cryptography]
 passlib[bcrypt]
 bcrypt==4.0.1
 python-multipart
+
+# HTTP
 requests
+httpx
+
+# Caching & Queue
+redis
+
+# System Monitoring
 psutil
+
+# Scheduling (weekly scan)
+apscheduler
+
+# Streaming (SSE)
+sse-starlette

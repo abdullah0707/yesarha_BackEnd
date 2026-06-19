@@ -2,6 +2,7 @@ version: "3.9"
 
 services:
 
+  # ── PostgreSQL ────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: yesarha_postgres
@@ -18,7 +19,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
+  # ── Ollama (GPU) ──────────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
     container_name: yesarha_ollama
@@ -33,24 +36,57 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    restart: unless-stopped
 
+  # ── Redis (Cache + Queue) ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: yesarha_redis
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  # ── SearXNG (Web Search — محلي مجاني) ────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    container_name: yesarha_searxng
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # ── Backend ───────────────────────────────────────────────────────
   backend:
     build: .
     container_name: yesarha_backend
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+psycopg2://yesarha:yesarha@postgres:5432/yesarha_core
       USE_SQLITE_FALLBACK: "false"
       OLLAMA_BASE_URL: http://ollama:11434
-      DEFAULT_MODEL: qwen3:8b
+      CORE_MODEL: qwen3:8b
+      REDIS_URL: redis://redis:6379/0
+      SEARXNG_URL: http://searxng:8080
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change_this_to_a_strong_random_secret}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change_internal_key}
       CORS_ORIGINS: '["*"]'
     ports:
       - "8000:8000"
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
 
 volumes:
   postgres_data:
   ollama_data:
+  redis_data:

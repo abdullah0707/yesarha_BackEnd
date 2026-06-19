@@ -1,33 +1,62 @@
 from pydantic_settings import BaseSettings
+from typing import Optional
 
 
 class Settings(BaseSettings):
-    # APP
+    # ── APP ───────────────────────────────────────────────────────
     APP_NAME: str = "YESARHA Core"
-    APP_VERSION: str = "2.0"
+    APP_VERSION: str = "3.0"
     API_PREFIX: str = "/api/v1"
     ENV: str = "development"
 
-    # DATABASE
-    DATABASE_URL: str = "postgresql+psycopg2://yesarha:yesarha@localhost:5432/yesarha_core"
-    USE_SQLITE_FALLBACK: bool = True
+    # ── DATABASE ──────────────────────────────────────────────────
+    DATABASE_URL: str = "postgresql+psycopg2://yesarha:yesarha@postgres:5432/yesarha_core"
+    USE_SQLITE_FALLBACK: bool = False
     SQLITE_PATH: str = "data/yesarha.db"
 
-    # AUTH / JWT
+    # ── AUTH / JWT ────────────────────────────────────────────────
     JWT_SECRET_KEY: str = "CHANGE_ME_SUPER_SECRET_KEY"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24        # 1 day
-    REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30  # 30 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
+    REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30
 
-    # OLLAMA
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    DEFAULT_MODEL: str = "qwen3:8b"
+    # ── OLLAMA ────────────────────────────────────────────────────
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
+    CORE_MODEL: str = "qwen3:8b"          # Yesarha Core العقل الرئيسي
+    CORE_MODEL_TIMEOUT: int = 300          # 5 دقائق max للردود الطويلة
 
-    # CHROMA (semantic memory - future)
-    CHROMA_PERSIST_DIR: str = "data/chroma"
+    # ── VRAM MANAGEMENT ───────────────────────────────────────────
+    VRAM_TOTAL_GB: float = 8.0
+    VRAM_CORE_RESERVED_GB: float = 5.5    # محجوز لـ Core دائماً
+    MODEL_IDLE_TIMEOUT_SECONDS: int = 300  # تفريغ النموذج بعد 5 دقائق خمول
 
-    # CORS
+    # ── WEB INTELLIGENCE ─────────────────────────────────────────
+    SEARXNG_URL: str = "http://searxng:8080"
+    WEB_SEARCH_MAX_RESULTS: int = 10
+    WEB_SEARCH_TIMEOUT: int = 15
+    WEEKLY_SCAN_ENABLED: bool = True
+    WEEKLY_SCAN_DAY: str = "monday"        # يوم الفحص الأسبوعي
+
+    # ── REDIS ─────────────────────────────────────────────────────
+    REDIS_URL: str = "redis://redis:6379/0"
+    CACHE_TTL_SECONDS: int = 3600          # cache المعلومات ساعة واحدة
+
+    # ── STREAMING ────────────────────────────────────────────────
+    STREAM_CHUNK_SIZE: int = 50            # عدد tokens في كل chunk
+    STREAM_HEARTBEAT_SECONDS: int = 15     # keep-alive للاتصالات
+
+    # ── VOICE SPECIALIST ─────────────────────────────────────────
+    WHISPER_MODEL: str = "large-v3"        # أفضل دقة للعربية والإنجليزية
+    XTTS_MODEL_PATH: str = "data/xtts"
+    VOICE_SAMPLE_MIN_SECONDS: int = 6      # حد أدنى لعينة الصوت
+
+    # ── SECURITY ─────────────────────────────────────────────────
     CORS_ORIGINS: list[str] = ["*"]
+    RATE_LIMIT_PER_MINUTE: int = 60
+    INTERNAL_API_KEY: str = "CHANGE_ME_INTERNAL_KEY"  # للاتصالات الداخلية
+
+    # ── SPECIALIST MODELS ─────────────────────────────────────────
+    SPECIALIST_BASE_PATH: str = "data/specialists"  # مسار نماذج المتخصصة
 
     class Config:
         env_file = ".env"
