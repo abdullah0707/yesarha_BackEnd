@@ -17,7 +17,8 @@ class AIModel(Base):
 
     cost_per_call = Column(Numeric(12, 4), nullable=True)
     endpoint_url = Column(String, nullable=True)  # ollama base url for this model
-
+    description = Column(String, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
