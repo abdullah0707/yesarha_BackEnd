@@ -5,6 +5,7 @@ from app.models.specialist import (
     SpecialistModel, WebSearchCache, CoreTask,
     ModelPerformanceLog, TrainingSession
 )
+from app.models.education import SyncedContent, StudentQuestion
 
 __all__ = [
     "Admin",
@@ -12,4 +13,5 @@ __all__ = [
     "Goal", "Project", "Task", "Execution",
     "SpecialistModel", "WebSearchCache", "CoreTask",
     "ModelPerformanceLog", "TrainingSession",
+    "SyncedContent", "StudentQuestion",
 ]

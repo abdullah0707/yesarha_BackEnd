@@ -19,11 +19,14 @@ class OllamaClient:
 
     def chat(self, model: str, messages: list[dict],
              stream: bool = False, options: Optional[dict] = None,
+             tools: Optional[list[dict]] = None,
              timeout: int = None) -> dict:
         url = f"{self.base_url}/api/chat"
         payload = {"model": model, "messages": messages, "stream": False}
         if options:
             payload["options"] = options
+        if tools:
+            payload["tools"] = tools
 
         start = time.perf_counter()
         try:
@@ -42,10 +45,13 @@ class OllamaClient:
                            f"Ollama error {resp.status_code}: {resp.text[:300]}", 502)
 
         data = resp.json()
-        content = (data.get("message") or {}).get("content", "")
+        message = data.get("message") or {}
+        content = message.get("content", "")
+        tool_calls = message.get("tool_calls", [])  # صيغة Ollama البنيوية الحقيقية
 
         return {
             "content": content,
+            "tool_calls": tool_calls,
             "tokens_input": data.get("prompt_eval_count", 0) or 0,
             "tokens_output": data.get("eval_count", 0) or 0,
             "latency_ms": latency_ms,
@@ -56,6 +62,7 @@ class OllamaClient:
 
     def chat_stream(self, model: str, messages: list[dict],
                     options: Optional[dict] = None,
+                    tools: Optional[list[dict]] = None,
                     timeout: int = None) -> Generator[dict, None, None]:
         """
         يُرجع generator يُنتج chunks:
@@ -71,6 +78,8 @@ class OllamaClient:
         }
         if options:
             payload["options"] = options
+        if tools:
+            payload["tools"] = tools
 
         start = time.perf_counter()
 

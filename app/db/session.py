@@ -18,15 +18,23 @@ def _build_engine():
         except Exception:
             if not settings.USE_SQLITE_FALLBACK:
                 raise
-            # Fallback to SQLite
-            pass
+            # Fallback to default SQLite path
+            sqlite_path = BASE_DIR / settings.SQLITE_PATH
+            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+            return create_engine(
+                f"sqlite:///{sqlite_path}",
+                connect_args={"check_same_thread": False}
+            )
 
-    sqlite_path = BASE_DIR / settings.SQLITE_PATH
-    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(
-        f"sqlite:///{sqlite_path}",
-        connect_args={"check_same_thread": False}
-    )
+    if settings.DATABASE_URL.startswith("sqlite"):
+        # Respect an explicitly provided SQLite URL (e.g. for local testing)
+        return create_engine(
+            settings.DATABASE_URL,
+            connect_args={"check_same_thread": False}
+        )
+
+    # Fallback for any other configured DATABASE_URL
+    return create_engine(settings.DATABASE_URL, pool_pre_ping=True)
 
 
 engine = _build_engine()

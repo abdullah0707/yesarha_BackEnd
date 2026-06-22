@@ -1,8 +1,15 @@
 """
-Core Chat API — مع Streaming كامل وTool Calling
+Core Chat API — مع Streaming كامل وTool Calling حقيقي عبر Ollama
+
+التصميم:
+1. مرحلة تحديد الأدوات: استدعاء non-streaming سريع مع tools= لمعرفة
+   هل Core يحتاج أداة أم لا (يعتمد على tool_calls البنيوية من Ollama
+   نفسها، وليس تحليل نص حر — هذا يمنع الهلوسة والتكرار).
+2. إن وُجدت أدوات: تُنفَّذ، تُضاف نتائجها للسياق، ثم نكرر حتى 3 مرات.
+3. الرد النهائي يُبَث (stream) حقيقياً للعميل توكناً توكناً.
 """
 import json
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -13,14 +20,19 @@ from app.core.deps import get_current_admin
 from app.core.responses import success, AppError, ErrorCodes
 from app.core.config import settings
 from app.models.user import Admin
-from app.models.operations import Execution, Goal
+from app.models.operations import Execution
 from app.services.ollama_client import OllamaClient
-from app.core.intelligence.tool_engine import (
-    build_tool_call_prompt, parse_tool_calls_from_response, CORE_TOOLS
-)
+from app.core.intelligence.tool_engine import build_messages, CORE_TOOLS
 from app.core.intelligence.tool_executor import ToolExecutor
+from app.core.intelligence.async_bridge import sync_gen_to_async
 
 router = APIRouter(prefix="/core", tags=["Core Intelligence"])
+
+MAX_TOOL_ITERATIONS = 3
+
+
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 class CoreChatRequest(BaseModel):
@@ -41,7 +53,14 @@ def _get_client() -> OllamaClient:
     return OllamaClient(base_url=settings.OLLAMA_BASE_URL)
 
 
-# ── Core Chat (مع Tool Calling) ───────────────────────────────────
+def _resolve_tool_context(tool_results: list[dict]) -> str:
+    return "\n\n".join(
+        f"### {tr['tool']}:\n{json.dumps(tr['result'], ensure_ascii=False, indent=2)}"
+        for tr in tool_results
+    )
+
+
+# ── Core Chat ───────────────────────────────────────────────────
 
 @router.post("/chat")
 async def core_chat(
@@ -49,10 +68,6 @@ async def core_chat(
     db: Session = Depends(get_db),
     admin: Admin = Depends(get_current_admin)
 ):
-    """
-    محادثة مع Yesarha Core مع Tool Calling
-    يدعم streaming عبر SSE
-    """
     if payload.stream:
         return StreamingResponse(
             _stream_core_response(payload, db, admin),
@@ -64,81 +79,105 @@ async def core_chat(
             }
         )
 
-    # Non-streaming
     result = await _run_core_chat(payload, db, admin)
     return success(result)
 
 
+async def _resolve_tools_phase(payload: CoreChatRequest, executor: ToolExecutor):
+    """
+    مرحلة تحديد الأدوات: استدعاء سريع non-streaming.
+    يُرجع (tool_results, tool_context) — فارغة إذا لم تُستخدَم أدوات.
+    يُنفَّذ في thread منفصل حتى لا يحجب event loop.
+    """
+    client = _get_client()
+    tool_results: list[dict] = []
+    tool_context = ""
+
+    if not payload.enable_tools:
+        return tool_results, tool_context
+
+    messages = build_messages(payload.message, payload.history)
+
+    for _ in range(MAX_TOOL_ITERATIONS):
+        result = await sync_gen_to_async_single(
+            client.chat, model=settings.CORE_MODEL,
+            messages=messages, tools=CORE_TOOLS
+        )
+
+        calls = result.get("tool_calls") or []
+        if not calls:
+            return tool_results, tool_context
+
+        for call in calls:
+            fn = call.get("function", {})
+            name = fn.get("name", "")
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+
+            tool_result = executor.execute(name, args)
+            tool_results.append({"tool": name, "result": tool_result})
+
+        tool_context = _resolve_tool_context(tool_results)
+        messages = build_messages(payload.message, payload.history, tool_context)
+
+    return tool_results, tool_context
+
+
+async def sync_gen_to_async_single(fn, *args, **kwargs):
+    """يُشغّل دالة sync عادية (غير generator) في thread منفصل بدون حجب event loop"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+
+
 async def _stream_core_response(payload: CoreChatRequest, db: Session, admin: Admin):
-    """
-    Generator لـ SSE streaming
-    """
     client = _get_client()
     executor = ToolExecutor(db=db)
 
-    messages = build_tool_call_prompt(payload.message)
-    if payload.history:
-        # إدراج التاريخ قبل آخر رسالة
-        messages = messages[:-1]  # remove last user msg
-        messages.extend(payload.history)
-        messages.append({"role": "user", "content": payload.message})
+    tool_results: list[dict] = []
+    tool_context = ""
 
-    tool_results = []
+    # ── المرحلة 1: تحديد الأدوات (سريعة، non-streaming) ──
+    if payload.enable_tools:
+        yield _sse({"type": "thinking", "iteration": 1})
+        try:
+            tool_results, tool_context = await _resolve_tools_phase(payload, executor)
+        except AppError as e:
+            # خطأ حقيقي في الاتصال بـ Ollama — لا نُخفيه، نُبلّغ العميل فوراً
+            yield _sse({"type": "error", "code": e.code, "message": e.message})
+            return
+        except Exception:
+            # خطأ غير متوقع في منطق الأدوات نفسه (وليس Ollama) — نتابع بدون أدوات
+            tool_results, tool_context = [], ""
+
+        if tool_results:
+            yield _sse({"type": "tool_start", "tools": [t["tool"] for t in tool_results]})
+            for t in tool_results:
+                yield _sse({"type": "tool_executing", "tool": t["tool"]})
+                yield _sse({"type": "tool_done", "tool": t["tool"], "result": t["result"]})
+
+    # ── المرحلة 2: الرد النهائي — streaming حقيقي توكناً توكناً ──
+    final_messages = build_messages(payload.message, payload.history, tool_context or None)
     full_response = ""
-    max_iterations = 3  # حد أقصى لدورات Tool Calling
 
-    for iteration in range(max_iterations):
-        # أرسل ping للـ keep-alive
-        yield f"data: {json.dumps({'type': 'thinking', 'iteration': iteration + 1})}\n\n"
+    async for chunk in sync_gen_to_async(
+        client.chat_stream,
+        model=settings.CORE_MODEL,
+        messages=final_messages,
+    ):
+        if chunk["type"] == "token":
+            full_response += chunk["content"]
+            yield _sse({"type": "token", "content": chunk["content"]})
+        elif chunk["type"] == "done":
+            yield _sse({"type": "stats", **{k: v for k, v in chunk.items() if k != "type"}})
+        elif chunk["type"] == "error":
+            yield _sse(chunk)
+            return
 
-        # استدعاء Core
-        chunk_buffer = ""
-        for chunk in client.chat_stream(
-            model=settings.CORE_MODEL,
-            messages=messages,
-        ):
-            if chunk["type"] == "token":
-                token = chunk["content"]
-                full_response += token
-                chunk_buffer += token
-
-                # أرسل token فوراً للـ client
-                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-
-            elif chunk["type"] == "done":
-                yield f"data: {json.dumps({'type': 'stats', **{k: v for k, v in chunk.items() if k != 'type'}})}\n\n"
-
-            elif chunk["type"] == "error":
-                yield f"data: {json.dumps(chunk)}\n\n"
-                return
-
-        # فحص Tool Calls في الرد
-        if payload.enable_tools:
-            calls = parse_tool_calls_from_response(full_response)
-
-            if calls:
-                yield f"data: {json.dumps({'type': 'tool_start', 'tools': [c.get('name') for c in calls]})}\n\n"
-
-                for call in calls:
-                    tool_name = call.get("name", "")
-                    params = call.get("parameters", call.get("arguments", {}))
-
-                    yield f"data: {json.dumps({'type': 'tool_executing', 'tool': tool_name})}\n\n"
-
-                    result = executor.execute(tool_name, params)
-                    tool_results.append({"tool": tool_name, "result": result})
-
-                    yield f"data: {json.dumps({'type': 'tool_done', 'tool': tool_name, 'result': result})}\n\n"
-
-                # أضف النتائج للـ context وأعد المحاولة
-                messages = build_tool_call_prompt(payload.message, tool_results)
-                full_response = ""
-                continue
-
-        # لا يوجد tool calls — انتهى
-        break
-
-    # حفظ في قاعدة البيانات
     try:
         db.add(Execution(
             user_id=admin.id,
@@ -152,35 +191,22 @@ async def _stream_core_response(payload: CoreChatRequest, db: Session, admin: Ad
     except Exception:
         pass
 
-    yield f"data: {json.dumps({'type': 'done', 'full_response': full_response})}\n\n"
+    yield _sse({"type": "done", "full_response": full_response})
     yield "data: [DONE]\n\n"
 
 
 async def _run_core_chat(payload: CoreChatRequest, db: Session, admin: Admin) -> dict:
-    """Non-streaming version"""
+    """Non-streaming version — نفس منطق المرحلتين لكن بدون SSE"""
     client = _get_client()
     executor = ToolExecutor(db=db)
 
-    messages = build_tool_call_prompt(payload.message)
-    tool_results = []
-    full_response = ""
+    tool_results, tool_context = await _resolve_tools_phase(payload, executor)
 
-    for _ in range(3):
-        result = client.chat(model=settings.CORE_MODEL, messages=messages)
-        full_response = result["content"]
-
-        if payload.enable_tools:
-            calls = parse_tool_calls_from_response(full_response)
-            if calls:
-                for call in calls:
-                    tr = executor.execute(call.get("name"), call.get("parameters", {}))
-                    tool_results.append({"tool": call.get("name"), "result": tr})
-                messages = build_tool_call_prompt(payload.message, tool_results)
-                continue
-        break
+    final_messages = build_messages(payload.message, payload.history, tool_context or None)
+    result = client.chat(model=settings.CORE_MODEL, messages=final_messages)
 
     return {
-        "content": full_response,
+        "content": result["content"],
         "tokens_input": result.get("tokens_input", 0),
         "tokens_output": result.get("tokens_output", 0),
         "latency_ms": result.get("latency_ms", 0),
@@ -196,11 +222,7 @@ async def specialist_chat(
     db: Session = Depends(get_db),
     admin: Admin = Depends(get_current_admin)
 ):
-    """
-    محادثة مع نموذج متخصص محدد مع streaming
-    """
     from app.models.specialist import SpecialistModel
-    from app.services.models.model_manager import model_manager
 
     specialist = db.query(SpecialistModel).filter(
         SpecialistModel.name == payload.specialist_name,
@@ -218,19 +240,13 @@ async def specialist_chat(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
 
-    # Non-streaming
     client = _get_client()
     messages = [{"role": "system", "content": specialist.system_prompt or ""}]
     if payload.history:
         messages.extend(payload.history)
     messages.append({"role": "user", "content": payload.message})
 
-    result = client.chat(
-        model=specialist.base_model or settings.CORE_MODEL,
-        messages=messages
-    )
-
-    # تحديث إحصائيات النموذج
+    result = client.chat(model=specialist.base_model or settings.CORE_MODEL, messages=messages)
     specialist.total_requests = (specialist.total_requests or 0) + 1
     db.commit()
 
@@ -252,20 +268,21 @@ async def _stream_specialist(payload, specialist, db: Session, admin: Admin):
     messages.append({"role": "user", "content": payload.message})
 
     full_response = ""
-    yield f"data: {json.dumps({'type': 'specialist_info', 'name': specialist.display_name, 'model': specialist.base_model})}\n\n"
+    yield _sse({"type": "specialist_info", "name": specialist.display_name, "model": specialist.base_model})
 
-    for chunk in client.chat_stream(
+    async for chunk in sync_gen_to_async(
+        client.chat_stream,
         model=specialist.base_model or settings.CORE_MODEL,
         messages=messages
     ):
         if chunk["type"] == "token":
             full_response += chunk["content"]
-            yield f"data: {json.dumps(chunk)}\n\n"
+            yield _sse(chunk)
         elif chunk["type"] in ("done", "error"):
-            yield f"data: {json.dumps(chunk)}\n\n"
+            yield _sse(chunk)
 
     specialist.total_requests = (specialist.total_requests or 0) + 1
     db.commit()
 
-    yield f"data: {json.dumps({'type': 'done', 'full_response': full_response})}\n\n"
+    yield _sse({"type": "done", "full_response": full_response})
     yield "data: [DONE]\n\n"

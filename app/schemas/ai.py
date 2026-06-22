@@ -11,6 +11,7 @@ class AIModelBase(BaseModel):
     is_default: bool = False
     cost_per_call: Optional[Decimal] = None
     endpoint_url: Optional[str] = None
+    description: Optional[str] = None
 
 
 class AIModelCreate(AIModelBase):
@@ -25,6 +26,7 @@ class AIModelUpdate(BaseModel):
     is_default: Optional[bool] = None
     cost_per_call: Optional[Decimal] = None
     endpoint_url: Optional[str] = None
+    description: Optional[str] = None
 
 
 class AIModelOut(AIModelBase):

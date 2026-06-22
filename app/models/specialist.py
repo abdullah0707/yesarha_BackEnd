@@ -23,16 +23,22 @@ class SpecialistModel(Base):
     ollama_model_name = Column(String, nullable=True)            # بعد تحميله
 
     # الضبط والإعداد
-    system_prompt = Column(Text, nullable=True)                  # System prompt المتخصص
+    system_prompt = Column(Text, nullable=True)                  # System prompt المتخصص (يُولَّد تلقائياً أو يُحرَّر يدوياً)
     system_prompt_ar = Column(Text, nullable=True)
     config_json = Column(JSON, default=dict)                     # إعدادات إضافية
     tools_enabled = Column(JSON, default=list)                   # الأدوات المتاحة
+
+    # مصدر بيانات خارجي (لنماذج مثل التعليم التي تتصل بباك إند المستخدمين)
+    content_source_url = Column(String, nullable=True)           # رابط API لجلب المحتوى، مثل https://users-api.yesarha.ai/content
+    content_source_api_key = Column(String, nullable=True)       # مفتاح المصادقة عند الاتصال بهذا المصدر (إن وُجد)
+    uses_external_content = Column(Boolean, default=False)       # هل هذا النموذج يعتمد على مصدر بيانات خارجي؟
 
     # الحالة
     status = Column(String, default="creating")
     # creating | downloading | training | active | inactive | error
     is_public_api = Column(Boolean, default=True)               # هل له API عام؟
     api_endpoint = Column(String, nullable=True)                 # /api/v1/specialist/code
+    api_key = Column(String, nullable=True, unique=True, index=True)  # مفتاح API للمستخدمين الخارجيين
 
     # المعلومات التقنية
     vram_required_gb = Column(Float, default=5.0)

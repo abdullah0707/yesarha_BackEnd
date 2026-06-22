@@ -68,23 +68,55 @@ def get_manifest(_admin=Depends(get_current_admin)):
                 "key": "specialists",
                 "label": L("النماذج المتخصصة", "Specialist Models"),
                 "icon": "layers",
-                "description": L("نماذج متخصصة تُنشأ بواسطة Core", "Specialist models created by Core"),
+                "description": L("نماذج متخصصة تُنشأ بواسطة Core، ولكل نموذج API Key مستقل للربط الخارجي", "Specialist models created by Core, each with its own API Key for external integration"),
                 "endpoints": {
-                    "list":        f"{p}/admin/specialists",
-                    "create":      f"{p}/admin/specialists",
-                    "update":      f"{p}/admin/specialists/{{id}}",
-                    "delete":      f"{p}/admin/specialists/{{id}}",
-                    "performance": f"{p}/admin/specialists/{{id}}/performance",
-                    "train":       f"{p}/admin/specialists/{{id}}/trigger-training",
+                    "list":              f"{p}/admin/specialists",
+                    "create":            f"{p}/admin/specialists",
+                    "get":               f"{p}/admin/specialists/{{id}}",
+                    "update":            f"{p}/admin/specialists/{{id}}",
+                    "delete":            f"{p}/admin/specialists/{{id}}",
+                    "performance":       f"{p}/admin/specialists/{{id}}/performance",
+                    "train":             f"{p}/admin/specialists/{{id}}/trigger-training",
+                    "regenerate_key":    f"{p}/admin/specialists/{{id}}/regenerate-key",
+                    "specializations":   f"{p}/admin/specialists/specializations",
+                    "public_chat":       f"{p}/specialist/ask",
+                    "education_ask":     f"{p}/specialist/education/ask",
+                    "content_sync":      f"{p}/specialist/content/sync",
+                    "content_sync_delete": f"{p}/specialist/content/sync/{{content_id}}",
                 },
                 "schema": {
                     "name":          _f("string", "اسم النموذج (بالإنجليزية)", "Model Name (English)", required=True, placeholder="yesarha-code"),
                     "display_name":  _f("string", "الاسم المعروض", "Display Name", required=True),
                     "display_name_ar": _f("string", "الاسم بالعربية", "Arabic Name", nullable=True),
                     "specialization": _f("enum",  "التخصص", "Specialization",
-                                         options=["code","voice","image","education","custom"]),
+                                         options=["code","voice","image","education","media","business","custom"]),
                     "description":   _f("textarea", "الوصف", "Description", nullable=True),
-                }
+                    "system_prompt": _f("textarea", "System Prompt (يُولَّد تلقائياً، قابل للتعديل)", "System Prompt (auto-generated, editable)", nullable=True),
+                    "uses_external_content": _f("boolean", "يعتمد على محتوى مُزامَن خارجياً (مثل التعليم)", "Relies on externally synced content (e.g. education)", default=False),
+                    "content_source_url": _f("string", "ملاحظة توثيقية: رابط/اسم نظام مصدر المحتوى لدى باك إند المستخدمين", "Reference note: content source system URL/name on the users backend", nullable=True, placeholder="users-backend://courses-service"),
+                    "content_source_api_key": _f("password", "ملاحظة توثيقية: مفتاح المصادقة المستخدَم من جهة باك إند المستخدمين (إن وُجد)", "Reference note: auth key used by the users backend (if any)", nullable=True),
+                },
+                "public_api_note": L(
+                    "نموذج عادي: X-API-Key + POST /api/v1/specialist/ask. نموذج تعليمي (مزامنة محتوى): يُرسَل المحتوى مسبقاً عبر POST /api/v1/specialist/content/sync (محمي بـ X-Internal-Key)، ثم يُستخدَم النموذج عبر X-API-Key + POST /api/v1/specialist/education/ask مع {content_id, question} — يقرأ المحتوى المُخزَّن محلياً ويرد بشرح مبني عليه فقط، بـ streaming.",
+                    "Regular model: X-API-Key + POST /api/v1/specialist/ask. Education model (content sync): content is pushed beforehand via POST /api/v1/specialist/content/sync (protected by X-Internal-Key), then the model is used via X-API-Key + POST /api/v1/specialist/education/ask with {content_id, question} — reads the locally stored content and answers based on it only, streamed."
+                )
+            },
+            {
+                "key": "synced_content",
+                "label": L("المحتوى المُزامَن", "Synced Content"),
+                "icon": "database",
+                "description": L(
+                    "محتوى تعليمي وصل من باك إند المستخدمين عبر webhook المزامنة — للمراقبة فقط",
+                    "Educational content received from the users backend via the sync webhook — monitoring only"
+                ),
+                "endpoints": {
+                    "list": f"{p}/admin/synced-content",
+                    "get":  f"{p}/admin/synced-content/{{content_id}}",
+                },
+                "webhook_note": L(
+                    "باك إند المستخدمين يرسل المحتوى عبر: POST /api/v1/specialist/content/sync مع Header: X-Internal-Key، وبنية {content_id, title, payload: {مقدمة, أهداف, دروس: [...]}}",
+                    "Users backend pushes content via: POST /api/v1/specialist/content/sync with Header: X-Internal-Key, body {content_id, title, payload: {intro, objectives, lessons: [...]}}"
+                )
             },
             {
                 "key": "models",
