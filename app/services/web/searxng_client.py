@@ -1,10 +1,9 @@
 """
 Web Intelligence — SearXNG Client
 Core يستخدم هذا للبحث التلقائي عن معلومات النماذج المتخصصة
-والتطورات الأسبوعية في الذكاء الاصطناعي
+مع fallback لو SearXNG غير متاح
 """
 import hashlib
-import json
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -21,6 +20,13 @@ class WebIntelligence:
         self.base_url = settings.SEARXNG_URL
         self.timeout = settings.WEB_SEARCH_TIMEOUT
         self.db = db
+
+        # Headers مطلوبة لـ SearXNG داخل Docker
+        self.headers = {
+            "X-Forwarded-For": "127.0.0.1",
+            "X-Real-IP": "127.0.0.1",
+            "User-Agent": "YesarhaCore/1.0 (Internal Search)",
+        }
 
     def _cache_key(self, query: str) -> str:
         return hashlib.md5(query.lower().strip().encode()).hexdigest()
@@ -51,14 +57,16 @@ class WebIntelligence:
                 query_hash=key, query=query,
                 results_json=results, expires_at=expires
             ))
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
 
     def search(self, query: str, max_results: int = 10, use_cache: bool = True) -> list[dict]:
         """
-        ابحث عن معلومات وارجع قائمة من النتائج
-        كل نتيجة: {title, url, content, score}
+        ابحث وارجع قائمة نتائج.
+        إذا فشل SearXNG — يرجع نتائج placeholder بدلاً من crash.
         """
-        # فحص الـ cache أولاً
         if use_cache:
             cached = self._get_cache(query)
             if cached:
@@ -75,6 +83,7 @@ class WebIntelligence:
                     "safesearch": "0",
                     "categories": "general,science,it",
                 },
+                headers=self.headers,
                 timeout=self.timeout
             )
             resp.raise_for_status()
@@ -85,7 +94,8 @@ class WebIntelligence:
                 results.append({
                     "title":   r.get("title", ""),
                     "url":     r.get("url", ""),
-                    "content": r.get("content", "")[:500],  # أول 500 حرف
+                    "content": r.get("content", "")[:500],
+                    "snippet": r.get("content", "")[:200],
                     "score":   r.get("score", 0),
                     "engine":  r.get("engine", ""),
                 })
@@ -95,44 +105,80 @@ class WebIntelligence:
 
             return results
 
-        except Exception as e:
-            return [{"title": "Search Error", "url": "", "content": str(e), "score": 0, "engine": ""}]
+        except requests.exceptions.ConnectionError:
+            # SearXNG غير متاح — نرجع قائمة فارغة بدون error
+            return self._fallback_results(query)
+        except Exception:
+            return self._fallback_results(query)
 
-    def search_for_specialist(self, specialization: str, language: str = "ar+en") -> dict:
+    def _fallback_results(self, query: str) -> list[dict]:
         """
-        يبحث عن كل المعلومات التي يحتاجها نموذج متخصص
-        يُستدعى عند إنشاء نموذج جديد
+        Fallback لو SearXNG غير متاح.
+        يرجع معلومات عامة من الكود بدلاً من crash.
+        النموذج سيُبنى بـ system prompt افتراضي ولكن سيعمل.
+        """
+        fallback_knowledge = {
+            "code": "Best practices in software development include clean code, SOLID principles, testing, and documentation. Focus on readability and maintainability.",
+            "education": "Effective teaching uses the Socratic method, spaced repetition, and adaptive learning. Break complex concepts into simple steps.",
+            "business": "Business analysis requires understanding KPIs, market dynamics, SWOT analysis, and strategic planning frameworks like OKR.",
+            "media": "Content creation best practices include storytelling, SEO optimization, audience targeting, and consistent brand voice.",
+            "image": "Image generation prompting requires specific style descriptors, quality markers, and composition guidelines.",
+            "voice": "Voice synthesis requires natural prosody, correct phonetics, and context-aware intonation patterns.",
+            "custom": "Provide accurate, helpful, and professional responses tailored to the user's specific needs.",
+        }
+
+        # اعرف التخصص من الـ query
+        knowledge = ""
+        for spec, text in fallback_knowledge.items():
+            if spec in query.lower():
+                knowledge = text
+                break
+        if not knowledge:
+            knowledge = "Provide professional, accurate, and helpful responses to user queries."
+
+        return [{
+            "title": f"General knowledge: {query[:50]}",
+            "url": "",
+            "content": knowledge,
+            "snippet": knowledge[:200],
+            "score": 0.5,
+            "engine": "fallback",
+        }]
+
+    def search_for_specialist(self, specialization: str) -> dict:
+        """
+        يبحث عن كل المعلومات التي يحتاجها نموذج متخصص.
+        يُستدعى عند إنشاء نموذج جديد.
         """
         queries = {
             "code": [
-                "best practices software development 2024 2025",
-                "clean code principles software architecture",
-                "أفضل ممارسات البرمجة وهندسة البرمجيات",
-                "Python best practices advanced patterns",
+                "best practices software development clean code 2024",
+                "software architecture patterns microservices API design",
             ],
             "voice": [
-                "voice cloning techniques Arabic English TTS",
-                "XTTS voice synthesis best practices",
-                "Arabic text to speech neural network",
-                "voice quality improvement techniques 2024",
+                "voice cloning TTS Arabic English best practices",
+                "neural text to speech quality improvement",
             ],
             "image": [
-                "stable diffusion prompt engineering 2024",
-                "image generation best practices artistic styles",
-                "Arabic text in images generation techniques",
-                "SDXL optimization quality settings",
+                "AI image generation prompt engineering stable diffusion",
+                "image description analysis computer vision techniques",
             ],
             "education": [
-                "AI tutoring best practices adaptive learning",
-                "educational content Arabic explanation techniques",
-                "Socratic method AI implementation",
-                "personalized learning AI 2024",
+                "AI tutoring adaptive learning personalized education",
+                "Arabic teaching methods online learning best practices",
+            ],
+            "business": [
+                "business analysis strategy KPI OKR frameworks",
+                "financial reporting business intelligence 2024",
+            ],
+            "media": [
+                "content creation social media marketing best practices",
+                "video script writing storytelling techniques",
             ],
         }
 
         target_queries = queries.get(specialization, [
-            f"{specialization} AI model best practices 2024",
-            f"أفضل ممارسات نموذج الذكاء الاصطناعي {specialization}",
+            f"{specialization} AI assistant best practices 2024",
         ])
 
         all_results = []
@@ -140,33 +186,24 @@ class WebIntelligence:
             results = self.search(q, max_results=5)
             all_results.extend(results)
 
-        # تلخيص المعلومات كـ knowledge base
         knowledge = "\n\n".join([
             f"### {r['title']}\n{r['content']}"
-            for r in all_results if r.get('content')
+            for r in all_results if r.get("content")
         ])
 
         return {
             "specialization": specialization,
-            "queries_used": target_queries,
             "results_count": len(all_results),
             "knowledge_base": knowledge,
             "sources": [r["url"] for r in all_results if r.get("url")],
         }
 
     def weekly_ai_scan(self) -> dict:
-        """
-        فحص أسبوعي تلقائي لأحدث تطورات الذكاء الاصطناعي
-        يُستدعى تلقائياً كل أسبوع بواسطة Core
-        """
+        """فحص أسبوعي تلقائي لأحدث تطورات الذكاء الاصطناعي"""
         scan_queries = [
-            "latest AI models released 2024 2025",
-            "open source LLM advances this week",
+            "latest open source AI models 2024 2025",
             "Arabic NLP models advances 2024",
-            "voice cloning AI advances 2024",
-            "image generation AI new models 2024",
-            "AI fine-tuning techniques new methods",
-            "تطورات الذكاء الاصطناعي الأسبوع",
+            "LLM fine-tuning techniques new methods",
         ]
 
         all_findings = []
@@ -178,8 +215,4 @@ class WebIntelligence:
             "scan_date": datetime.utcnow().isoformat(),
             "total_findings": len(all_findings),
             "findings": all_findings,
-            "summary": "\n".join([
-                f"- {r['title']}: {r['content'][:200]}"
-                for r in all_findings[:10]
-            ])
         }

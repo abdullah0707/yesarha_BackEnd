@@ -25,5 +25,12 @@ psutil
 # Scheduling (weekly scan)
 apscheduler
 
+# Voice Specialist (Phase 3)
+# تُثبَّت عبر Docker build arg: VOICE_INSTALL=true
+# أو يدوياً داخل الـ container:
+#   docker exec -it yesarha_backend-backend-1 bash
+#   pip install openai-whisper TTS torch torchaudio
+# لا تضفها هنا مباشرة — حجمها كبير وتبطئ الـ build
+
 # Streaming (SSE)
 sse-starlette

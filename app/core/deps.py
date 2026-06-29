@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.core.security import decode_token
 from app.core.responses import AppError, ErrorCodes
 from app.models.user import Admin
+from app.models.specialist import SpecialistModel
 
 
 def get_current_admin(
@@ -61,3 +62,40 @@ def require_permission(permission: str):
             raise AppError(ErrorCodes.FORBIDDEN, "Only super_admin can manage admins", 403)
         return admin
     return _check
+
+
+def get_api_key_specialist(
+    x_api_key: str = Header(default=None, alias="X-API-Key"),
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db)
+) -> SpecialistModel:
+    """
+    يتحقق من X-API-Key للوصول لـ specialist endpoints.
+    يقبل أيضاً Bearer token للأدمن من لوحة التحكم.
+    """
+    # أولاً: جرب X-API-Key
+    if x_api_key:
+        spec = db.query(SpecialistModel).filter(
+            SpecialistModel.api_key == x_api_key,
+            SpecialistModel.status == "active"
+        ).first()
+        if spec:
+            return spec
+        raise AppError(ErrorCodes.UNAUTHORIZED, "API Key غير صالح أو النموذج غير نشط", 401)
+
+    # ثانياً: Bearer token للأدمن (من لوحة التحكم)
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        from app.core.security import decode_token
+        payload = decode_token(token)
+        if payload and payload.get("type") == "access":
+            # الأدمن يقدر يستخدم أي نموذج voice نشط
+            spec = db.query(SpecialistModel).filter(
+                SpecialistModel.specialization == "voice",
+                SpecialistModel.status == "active"
+            ).first()
+            if spec:
+                return spec
+            raise AppError(ErrorCodes.NOT_FOUND, "نموذج الصوت غير نشط", 404)
+
+    raise AppError(ErrorCodes.UNAUTHORIZED, "يجب إرسال X-API-Key أو Bearer token", 401)

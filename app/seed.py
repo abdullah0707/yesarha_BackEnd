@@ -18,7 +18,7 @@ def run():
         if not db.query(Admin).filter(Admin.email == "admin@yesarha.ai").first():
             db.add(Admin(
                 email="admin@yesarha.ai",
-                password_hash=hash_password("ChangeMe123!"),
+                password_hash=hash_password("AbdMoh@@00"),
                 full_name="Super Admin",
                 role="super_admin",
                 permissions=ALL_PERMISSIONS,
@@ -26,7 +26,7 @@ def run():
                 preferred_language="ar"
             ))
             db.commit()
-            print("✅ Created super_admin: admin@yesarha.ai / ChangeMe123!")
+            print("✅ Created super_admin: admin@yesarha.ai / ***********")
         else:
             print("⚠️  Super admin exists, skipping.")
 
@@ -74,7 +74,7 @@ def run():
         print("\n🚀 YESARHA Core v3.0 is ready!")
         print("=" * 50)
         print("Admin:    admin@yesarha.ai")
-        print("Password: ChangeMe123!  ← غيّر فوراً!")
+        # print("Password: AbdMoh@@00  ← غيّر فوراً!")
         print("Docs:     http://localhost:8000/docs")
         print("=" * 50)
 

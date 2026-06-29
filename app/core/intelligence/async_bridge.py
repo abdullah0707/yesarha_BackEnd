@@ -1,26 +1,29 @@
 """
-Async Bridge — يحوّل sync generator (مثل requests stream) إلى async generator حقيقي
-بدون حجب event loop. ضروري لأي streaming حقيقي مع مكتبات sync مثل requests.
+Async Bridge — يحوّل sync generator إلى async generator حقيقي
+بدون حجب event loop. ضروري لـ streaming مع مكتبات sync مثل requests.
 """
 import asyncio
-from queue import Queue, Empty
+from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-from typing import Generator, AsyncGenerator, TypeVar
+from typing import AsyncGenerator, TypeVar
 
 T = TypeVar("T")
 
 _executor = ThreadPoolExecutor(max_workers=16)
-
 _SENTINEL = object()
 
 
 async def sync_gen_to_async(sync_gen_fn, *args, **kwargs) -> AsyncGenerator:
     """
-    يأخذ دالة تُرجع sync generator (مثل client.chat_stream)
-    ويحوّلها لـ async generator حقيقي يدفع كل عنصر فوراً للعميل
-    بمجرد توفره، دون حجب event loop أثناء الانتظار على الشبكة.
+    يأخذ دالة تُرجع sync generator ويحوّلها لـ async generator حقيقي.
+    يدفع كل عنصر فوراً للعميل بمجرد توفره، دون حجب event loop.
+    متوافق مع Python 3.10+ (يستخدم asyncio.get_running_loop بدل get_event_loop).
     """
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+
     q: Queue = Queue()
 
     def _runner():
@@ -36,7 +39,6 @@ async def sync_gen_to_async(sync_gen_fn, *args, **kwargs) -> AsyncGenerator:
 
     while True:
         try:
-            # فحص غير حاجز كل 10ms بدل blocking كامل على الـ thread الرئيسي
             item = await loop.run_in_executor(None, q.get, True, 0.5)
         except Exception:
             continue
