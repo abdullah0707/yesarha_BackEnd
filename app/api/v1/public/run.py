@@ -7,7 +7,6 @@ from app.core.deps import get_current_user
 from app.core.responses import success, AppError, ErrorCodes
 from app.models.user import User
 from app.models.ai import Agent
-from app.models.operations import Goal, Execution
 from app.schemas.run import RunRequest
 from app.services import credit_engine
 from app.services.agent_runtime import run_agent
@@ -67,16 +66,7 @@ def run_pipeline(payload: RunRequest, db: Session = Depends(get_db), user: User 
     steps = []
     plan_text = payload.goal
 
-    # store the goal
-    goal_record = Goal(user_id=user.id, title=payload.goal, status="active")
-    db.add(goal_record)
-    db.commit()
-    db.refresh(goal_record)
-
     try:
-        # -------------------------------------------------
-        # 1. PLANNER (optional)
-        # -------------------------------------------------
         if payload.use_planner:
             planner = _get_active_agent(db, "planner")
             if planner:
@@ -93,9 +83,6 @@ def run_pipeline(payload: RunRequest, db: Session = Depends(get_db), user: User 
                     "credits_charged": float(cost)
                 })
 
-        # -------------------------------------------------
-        # 2. EXECUTOR (required)
-        # -------------------------------------------------
         executor = _get_active_agent(db, "executor")
         if not executor:
             raise AppError(ErrorCodes.NOT_FOUND, "No active 'executor' agent configured", 404)
@@ -103,7 +90,6 @@ def run_pipeline(payload: RunRequest, db: Session = Depends(get_db), user: User 
         executor_input = plan_text if payload.use_planner else payload.goal
         result, cost = _execute_step(db, user, wallet, policy, executor, executor_input, service_key)
         final_output = result["content"]
-
         steps.append({
             "agent_type": "executor",
             "agent_id": executor.id,
@@ -115,16 +101,12 @@ def run_pipeline(payload: RunRequest, db: Session = Depends(get_db), user: User 
             "credits_charged": float(cost)
         })
 
-        # -------------------------------------------------
-        # 3. CRITIC (optional)
-        # -------------------------------------------------
         critic_eval = None
         if payload.use_critic:
             critic = _get_active_agent(db, "critic")
             if critic:
                 critic_input = f"Goal:\n{payload.goal}\n\nResult to evaluate:\n{final_output}"
                 result, cost = _execute_step(db, user, wallet, policy, critic, critic_input, service_key)
-
                 steps.append({
                     "agent_type": "critic",
                     "agent_id": critic.id,
@@ -137,28 +119,14 @@ def run_pipeline(payload: RunRequest, db: Session = Depends(get_db), user: User 
                 })
                 critic_eval = result["content"]
 
-    except AppError as e:
-        db.add(Execution(
-            user_id=user.id, intent=service_key, tool="agent_pipeline",
-            tool_input={"goal": payload.goal}, status="failed",
-            result={"error": e.message, "steps": steps}
-        ))
-        db.commit()
+    except AppError:
         raise
 
     total_cost = sum(s["credits_charged"] for s in steps)
-
-    db.add(Execution(
-        user_id=user.id, intent=service_key, tool="agent_pipeline",
-        tool_input={"goal": payload.goal},
-        status="success",
-        result={"steps_count": len(steps), "total_credits": total_cost}
-    ))
-    db.commit()
     db.refresh(wallet)
 
     return success({
-        "goal_id": goal_record.id,
+        "goal": payload.goal,
         "final_output": final_output,
         "critic_evaluation": critic_eval,
         "steps": steps,

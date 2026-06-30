@@ -9,7 +9,7 @@ Education Specialist API
 """
 import json
 import time
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from app.db.session import get_db
 from app.core.config import settings
 from app.core.responses import success, AppError, ErrorCodes
+from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.models.specialist import SpecialistModel
 from app.models.education import SyncedContent, StudentQuestion
 from app.services.education.retriever import retrieve_relevant_chunks, build_context_from_chunks
@@ -47,7 +48,9 @@ def _sse(data: dict) -> str:
 
 
 @router.post("/ask")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 def ask_question(
+    request: Request,
     payload: AskRequest,
     specialist: SpecialistModel = Depends(get_specialist_by_api_key),
     db: Session = Depends(get_db),

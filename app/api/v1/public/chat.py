@@ -7,7 +7,6 @@ from app.core.deps import get_current_user
 from app.core.responses import success, AppError, ErrorCodes
 from app.models.user import User
 from app.models.ai import Agent
-from app.models.operations import Execution
 from app.schemas.chat import ChatRequest
 from app.services import credit_engine
 from app.services.model_resolver import resolve_model
@@ -83,11 +82,6 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db), user: User = Depen
             calculation_type=pricing.calculation_type if pricing else None,
             result_status="failed"
         )
-        db.add(Execution(
-            user_id=user.id, intent=service_key, tool="ollama_chat",
-            tool_input={"model": ai_model.name}, status="failed",
-            result={"error": e.message}
-        ))
         db.commit()
         raise
 
@@ -120,12 +114,6 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db), user: User = Depen
         result_status=result_status
     )
 
-    db.add(Execution(
-        user_id=user.id, intent=service_key, tool="ollama_chat",
-        tool_input={"model": ai_model.name, "agent_id": agent.id if agent else None},
-        status="success",
-        result={"tokens_output": result["tokens_output"], "latency_ms": result["latency_ms"]}
-    ))
     db.commit()
     db.refresh(wallet)
 

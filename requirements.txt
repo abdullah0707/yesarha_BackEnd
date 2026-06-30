@@ -34,3 +34,6 @@ apscheduler
 
 # Streaming (SSE)
 sse-starlette
+
+# Rate limiting
+slowapi

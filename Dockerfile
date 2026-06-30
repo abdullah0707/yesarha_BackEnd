@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -10,17 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Core requirements (سريعة) ──
+# ── Core requirements (BuildKit pip cache = سريع جداً عند rebuild) ──
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
-# ── Voice requirements (ثقيلة — تُبنى في layer منفصل) ──
+# ── Voice requirements (ثقيلة — layer منفصل + cache) ──
 # VOICE_INSTALL=true لتفعيل التثبيت عند الـ build
 ARG VOICE_INSTALL=false
-RUN if [ "$VOICE_INSTALL" = "true" ]; then \
-      pip install --no-cache-dir \
-        torch torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
-      pip install --no-cache-dir openai-whisper TTS; \
+COPY requirements-voice.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$VOICE_INSTALL" = "true" ]; then \
+      pip install -r requirements-voice.txt; \
     fi
 
 COPY app ./app

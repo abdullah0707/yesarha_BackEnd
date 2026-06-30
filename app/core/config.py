@@ -50,18 +50,29 @@ class Settings(BaseSettings):
     STREAM_CHUNK_SIZE: int = 50            # عدد tokens في كل chunk
     STREAM_HEARTBEAT_SECONDS: int = 15     # keep-alive للاتصالات
 
-    # ── VOICE SPECIALIST ─────────────────────────────────────────
-    WHISPER_MODEL: str = "large-v3"        # أفضل دقة للعربية والإنجليزية
-    XTTS_MODEL_PATH: str = "data/xtts"
-    VOICE_SAMPLE_MIN_SECONDS: int = 6      # حد أدنى لعينة الصوت
-
     # ── SECURITY ─────────────────────────────────────────────────
     CORS_ORIGINS: list[str] = ["*"]
     RATE_LIMIT_PER_MINUTE: int = 60
     INTERNAL_API_KEY: str = "CHANGE_ME_INTERNAL_KEY"  # للاتصالات الداخلية
 
     # ── SPECIALIST MODELS ─────────────────────────────────────────
-    SPECIALIST_BASE_PATH: str = "data/specialists"  # مسار نماذج المتخصصة
+    SPECIALIST_BASE_PATH: str = "data/specialists"
+
+    # ── PHASE 5 — BILLING / PAYMENTS ─────────────────────────────
+    DEFAULT_MODEL: str = "qwen3:8b"
+    PAYMENT_CURRENCY_DEFAULT: str = "EGP"
+
+    # Stripe (اختياري — اترك فارغاً لتعطيله)
+    STRIPE_SECRET_KEY: Optional[str] = None
+    STRIPE_WEBHOOK_SECRET: Optional[str] = None
+
+    # Paymob (اختياري — اترك فارغاً لتعطيله)
+    PAYMOB_API_KEY: Optional[str] = None
+    PAYMOB_INTEGRATION_ID: Optional[str] = None
+    PAYMOB_HMAC_SECRET: Optional[str] = None
+
+    # Subscription scheduler
+    SUBSCRIPTION_RENEWAL_CHECK_HOURS: int = 1  # كل ساعة
 
     class Config:
         env_file = ".env"

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.security import decode_token
 from app.core.responses import AppError, ErrorCodes
-from app.models.user import Admin
+from app.models.user import Admin, User
 from app.models.specialist import SpecialistModel
 
 
@@ -62,6 +62,46 @@ def require_permission(permission: str):
             raise AppError(ErrorCodes.FORBIDDEN, "Only super_admin can manage admins", 403)
         return admin
     return _check
+
+
+def require_admin(admin: Admin = Depends(get_current_admin)) -> Admin:
+    """Alias for get_current_admin — any active admin can proceed."""
+    return admin
+
+
+def get_current_user(
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db)
+) -> User:
+    """JWT auth for end-users (System 2 / Phase 5)."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise AppError(ErrorCodes.UNAUTHORIZED, "Missing or invalid Authorization header", 401)
+
+    token = authorization.split(" ", 1)[1].strip()
+    payload = decode_token(token)
+
+    if not payload:
+        raise AppError(ErrorCodes.TOKEN_INVALID, "Invalid or expired token", 401)
+
+    if payload.get("type") != "access":
+        raise AppError(ErrorCodes.TOKEN_INVALID, "Invalid token type", 401)
+
+    if payload.get("actor") != "user":
+        raise AppError(ErrorCodes.UNAUTHORIZED, "This endpoint requires a user token", 401)
+
+    user_id = payload.get("sub")
+    user = db.query(User).filter(User.id == int(user_id)).first()
+
+    if not user:
+        raise AppError(ErrorCodes.UNAUTHORIZED, "User not found", 401)
+
+    if user.status != "active":
+        raise AppError(ErrorCodes.FORBIDDEN, "User account is suspended", 403)
+
+    user.last_login_at = datetime.utcnow()
+    db.commit()
+
+    return user
 
 
 def get_api_key_specialist(

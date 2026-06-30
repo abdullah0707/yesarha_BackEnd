@@ -1,8 +1,13 @@
+import logging
+import traceback
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 
 from app.core.responses import error_response, ErrorCodes
 from app.core.responses import AppError
+
+logger = logging.getLogger("yesarha.errors")
 
 
 def register_exception_handlers(app: FastAPI):
@@ -15,7 +20,7 @@ def register_exception_handlers(app: FastAPI):
     async def validation_error_handler(request: Request, exc: RequestValidationError):
         return error_response(
             ErrorCodes.VALIDATION_ERROR,
-            str(exc.errors()),
+            "بيانات الطلب غير صالحة",
             422
         )
 
@@ -29,8 +34,13 @@ def register_exception_handlers(app: FastAPI):
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
+        logger.error(
+            "Unhandled exception on %s %s\n%s",
+            request.method, request.url.path,
+            traceback.format_exc()
+        )
         return error_response(
             ErrorCodes.INTERNAL_ERROR,
-            f"Unexpected error: {str(exc)}",
+            "حدث خطأ داخلي غير متوقع",
             500
         )

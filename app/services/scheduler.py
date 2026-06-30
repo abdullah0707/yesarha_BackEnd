@@ -96,14 +96,26 @@ def process_due_subscriptions():
         db.close()
 
 
-def start_scheduler() -> BackgroundScheduler:
-    scheduler = BackgroundScheduler(timezone="UTC")
-    scheduler.add_job(
+_scheduler: BackgroundScheduler | None = None
+
+
+def start_scheduler():
+    global _scheduler
+    if _scheduler and _scheduler.running:
+        return
+    _scheduler = BackgroundScheduler(timezone="UTC")
+    _scheduler.add_job(
         process_due_subscriptions,
         "interval",
         hours=1,
         id="subscription_renewal",
         replace_existing=True
     )
-    scheduler.start()
-    return scheduler
+    _scheduler.start()
+
+
+def stop_scheduler():
+    global _scheduler
+    if _scheduler and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None

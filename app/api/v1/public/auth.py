@@ -1,5 +1,5 @@
 from datetime import datetime
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -9,6 +9,7 @@ from app.core.security import (
     create_access_token, create_refresh_token, decode_token
 )
 from app.core.deps import get_current_admin
+from app.core.rate_limit import limiter
 from app.models.user import Admin
 from app.schemas.auth import LoginRequest, RefreshRequest, AdminOut
 
@@ -22,7 +23,8 @@ def _admin_payload(admin: Admin) -> dict:
 
 
 @router.post("/login")
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
 
     admin = db.query(Admin).filter(Admin.email == payload.email).first()
 
@@ -47,7 +49,8 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/refresh")
-def refresh_token(payload: RefreshRequest, db: Session = Depends(get_db)):
+@limiter.limit("30/minute")
+def refresh_token(request: Request, payload: RefreshRequest, db: Session = Depends(get_db)):
 
     decoded = decode_token(payload.refresh_token)
 

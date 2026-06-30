@@ -25,7 +25,7 @@ def create_token(data: dict, expires_minutes: int, token_type: str = "access") -
 
 def create_access_token(user_id: int, role: str) -> str:
     return create_token(
-        {"sub": str(user_id), "role": role},
+        {"sub": str(user_id), "role": role, "actor": "admin"},
         settings.ACCESS_TOKEN_EXPIRE_MINUTES,
         "access"
     )
@@ -33,7 +33,23 @@ def create_access_token(user_id: int, role: str) -> str:
 
 def create_refresh_token(user_id: int, role: str) -> str:
     return create_token(
-        {"sub": str(user_id), "role": role},
+        {"sub": str(user_id), "role": role, "actor": "admin"},
+        settings.REFRESH_TOKEN_EXPIRE_MINUTES,
+        "refresh"
+    )
+
+
+def create_user_access_token(user_id: int) -> str:
+    return create_token(
+        {"sub": str(user_id), "actor": "user"},
+        settings.ACCESS_TOKEN_EXPIRE_MINUTES,
+        "access"
+    )
+
+
+def create_user_refresh_token(user_id: int) -> str:
+    return create_token(
+        {"sub": str(user_id), "actor": "user"},
         settings.REFRESH_TOKEN_EXPIRE_MINUTES,
         "refresh"
     )

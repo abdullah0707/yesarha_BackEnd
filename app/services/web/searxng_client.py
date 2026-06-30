@@ -29,7 +29,7 @@ class WebIntelligence:
         }
 
     def _cache_key(self, query: str) -> str:
-        return hashlib.md5(query.lower().strip().encode()).hexdigest()
+        return hashlib.sha256(query.lower().strip().encode()).hexdigest()
 
     def _get_cache(self, query: str) -> Optional[list]:
         if not self.db:

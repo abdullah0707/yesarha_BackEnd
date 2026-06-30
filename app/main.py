@@ -1,11 +1,18 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
+from app.core.rate_limit import limiter
 from app.db.session import engine
 from app.models import *  # noqa
+
+MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # 60 MB — كافٍ لأي ملف صوتي عملي
 
 # Public
 from app.api.v1.public.health import router as health_router
@@ -34,18 +41,36 @@ from app.api.v1.specialist.public_chat import router as public_specialist_router
 from app.api.v1.specialist.content_sync import router as content_sync_router
 from app.api.v1.specialist.voice import router as voice_router
 
+# Phase 5 — Users & Billing
+from app.api.v1.public.user_auth import router as user_auth_router
+from app.api.v1.public.plans import router as public_plans_router
+from app.api.v1.public.wallet import router as wallet_router
+from app.api.v1.public.payments import router as payments_router
+from app.api.v1.public.chat import router as user_chat_router
+from app.api.v1.public.run import router as run_router
+from app.api.v1.admin.plans import router as admin_plans_router
+from app.api.v1.admin.subscriptions import router as subscriptions_router
+from app.api.v1.admin.ledger import router as ledger_router
+from app.api.v1.admin.credit_policy import router as credit_policy_router
+from app.api.v1.admin.service_pricing import router as service_pricing_router
+from app.api.v1.admin.end_users import router as end_users_router
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """يُشغَّل عند بدء التطبيق وعند إيقافه"""
     # ── Startup ──
     from app.core.intelligence.auto_monitor import core_monitor
+    from app.services.scheduler import start_scheduler, stop_scheduler
+
     core_monitor.start()
+    start_scheduler()
 
     yield  # التطبيق يعمل هنا
 
     # ── Shutdown ──
     core_monitor.stop()
+    stop_scheduler()
 
 
 def create_app() -> FastAPI:
@@ -67,6 +92,20 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+
+    @app.middleware("http")
+    async def enforce_max_body_size(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_UPLOAD_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"success": False, "error": "حجم الطلب يتجاوز الحد المسموح (60MB)"}
+            )
+        return await call_next(request)
 
     register_exception_handlers(app)
     p = settings.API_PREFIX
@@ -90,6 +129,20 @@ def create_app() -> FastAPI:
     app.include_router(public_specialist_router, prefix=p)
     app.include_router(content_sync_router,      prefix=p)
     app.include_router(voice_router,             prefix=p)
+
+    # Phase 5 — Users & Billing
+    app.include_router(user_auth_router,         prefix=p)
+    app.include_router(public_plans_router,      prefix=p)
+    app.include_router(wallet_router,            prefix=p)
+    app.include_router(payments_router,          prefix=p)
+    app.include_router(user_chat_router,         prefix=p)
+    app.include_router(run_router,               prefix=p)
+    app.include_router(admin_plans_router,       prefix=p)
+    app.include_router(subscriptions_router,     prefix=p)
+    app.include_router(ledger_router,            prefix=p)
+    app.include_router(credit_policy_router,     prefix=p)
+    app.include_router(service_pricing_router,   prefix=p)
+    app.include_router(end_users_router,         prefix=p)
 
     return app
 

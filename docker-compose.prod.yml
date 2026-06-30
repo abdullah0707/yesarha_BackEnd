@@ -1,23 +1,23 @@
 services:
 
   # ── PostgreSQL ────────────────────────────────────────────────────
+  # لا يوجد ports: مفتوح للخارج — فقط الشبكة الداخلية تصل له
   postgres:
     image: postgres:16-alpine
     container_name: yesarha_postgres
     environment:
-      POSTGRES_USER: yesarha
-      POSTGRES_PASSWORD: yesarha
-      POSTGRES_DB: yesarha_core
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-yesarha_core}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U yesarha -d yesarha_core"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-yesarha_core}"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    networks: [internal]
 
   # ── Ollama (GPU) ──────────────────────────────────────────────────
   ollama:
@@ -25,8 +25,6 @@ services:
     container_name: yesarha_ollama
     volumes:
       - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
     deploy:
       resources:
         reservations:
@@ -34,26 +32,20 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
     restart: unless-stopped
+    networks: [internal]
 
   # ── Redis (Cache + Queue) ─────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: yesarha_redis
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     restart: unless-stopped
+    networks: [internal]
 
-  # ── SearXNG (Web Search — محلي مجاني) ────────────────────────────
+  # ── SearXNG (Web Search — محلي) ───────────────────────────────────
   searxng:
     image: searxng/searxng:latest
     container_name: yesarha_searxng
@@ -61,11 +53,11 @@ services:
       - SEARXNG_BASE_URL=http://searxng:8080
     volumes:
       - ./searxng:/etc/searxng:rw
-    ports:
-      - "8080:8080"
     restart: unless-stopped
+    networks: [internal]
 
   # ── Backend ───────────────────────────────────────────────────────
+  # لا port مفتوح للخارج مباشرة — كل الترافيك يمر عبر Caddy (HTTPS)
   backend:
     build:
       context: .
@@ -77,30 +69,51 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-      ollama:
-        condition: service_started
     environment:
-      DATABASE_URL: postgresql+psycopg2://yesarha:yesarha@postgres:5432/yesarha_core
+      ENV: production
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-yesarha_core}
       USE_SQLITE_FALLBACK: "false"
       OLLAMA_BASE_URL: http://ollama:11434
-      CORE_MODEL: qwen3:8b
-      REDIS_URL: redis://redis:6379/0
+      CORE_MODEL: ${CORE_MODEL:-qwen3:8b}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       SEARXNG_URL: http://searxng:8080
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change_this_to_a_strong_random_secret}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change_internal_key}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
-      CORS_ORIGINS: '["*"]'
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required, e.g. '["https://dashboard.yourdomain.com"]'}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
       WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
       XTTS_MODEL_PATH: /app/data/xtts
-    ports:
-      - "8000:8000"
     volumes:
       - ./data:/app/data
       - voice_models:/app/data/xtts
     restart: unless-stopped
+    networks: [internal]
+
+  # ── Caddy — Reverse Proxy + Automatic HTTPS (Let's Encrypt) ───────
+  caddy:
+    image: caddy:2-alpine
+    container_name: yesarha_caddy
+    depends_on: [backend]
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is required, e.g. api.yourdomain.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks: [internal]
+
+networks:
+  internal:
 
 volumes:
   postgres_data:
   ollama_data:
   redis_data:
   voice_models:
+  caddy_data:
+  caddy_config:

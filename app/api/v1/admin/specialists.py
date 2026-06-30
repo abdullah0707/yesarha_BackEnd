@@ -3,12 +3,15 @@ Admin API للنماذج المتخصصة
 إدارة كاملة من لوحة التحكم — إنشاء، Pull تلقائي للموديل، تفعيل API Key، مراقبة الأداء
 """
 import json
+import re
 import time
 from fastapi import APIRouter, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,62}$")
 
 from app.db.session import get_db
 from app.core.deps import get_current_admin
@@ -36,6 +39,16 @@ class CreateSpecialistRequest(BaseModel):
     uses_external_content: bool = False
     content_source_url: Optional[str] = None
     content_source_api_key: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not _SAFE_NAME_RE.match(v):
+            raise ValueError(
+                "اسم النموذج يجب أن يحتوي فقط على حروف إنجليزية وأرقام وشرطات (-_)، "
+                "ولا يبدأ بشرطة، طوله 2-63 حرفاً"
+            )
+        return v.lower()
 
 
 class UpdateSpecialistRequest(BaseModel):

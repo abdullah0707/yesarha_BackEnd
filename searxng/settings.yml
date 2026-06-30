@@ -1,0 +1,79 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Yesarha Search"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  max_page: 5
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "yesarha_searxng_secret_key_change_in_production"
+  limiter: false
+  image_proxy: false
+  http_protocol_version: "1.0"
+
+# السماح للطلبات الداخلية من Docker بدون X-Forwarded-For
+real_ip:
+  x_for: 1
+  ipv4_mask: 0
+  ipv6_mask: 0
+  trusted_proxies:
+    - 127.0.0.1
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+
+ui:
+  static_use_hash: true
+  default_locale: "ar"
+  default_theme: simple
+  center_alignment: true
+
+enabled_plugins:
+  - "Hash plugin"
+  - "Self Information"
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    use_mobile_ui: false
+
+  - name: bing
+    engine: bing
+    shortcut: b
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: d
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: w
+    base_url: 'https://{language}.wikipedia.org/'
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: arxiv
+    categories: science
+
+  - name: github
+    engine: github
+    shortcut: gh
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 30.0
+  useragent_suffix: ""
+  pool_connections: 100
+  pool_maxsize: 20

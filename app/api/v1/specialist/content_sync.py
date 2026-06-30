@@ -6,8 +6,9 @@ Content Sync Webhook
 
 upsert: إذا external_content_id موجود مسبقاً يُحدَّث، وإلا يُنشأ جديداً.
 """
+import hmac
 import json
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Any
@@ -16,6 +17,7 @@ from datetime import datetime
 from app.db.session import get_db
 from app.core.config import settings
 from app.core.responses import success, AppError, ErrorCodes
+from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.models.education import SyncedContent
 from app.services.education.content_normalizer import normalize_to_chunks
 
@@ -29,13 +31,15 @@ class ContentSyncRequest(BaseModel):
 
 
 def _verify_internal_key(x_internal_key: str = Header(default=None, alias="X-Internal-Key")):
-    if not x_internal_key or x_internal_key != settings.INTERNAL_API_KEY:
+    if not x_internal_key or not hmac.compare_digest(x_internal_key, settings.INTERNAL_API_KEY):
         raise AppError(ErrorCodes.UNAUTHORIZED, "X-Internal-Key غير صحيح أو مفقود", 401)
     return True
 
 
 @router.post("/sync")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 def sync_content(
+    request: Request,
     payload: ContentSyncRequest,
     db: Session = Depends(get_db),
     _verified: bool = Depends(_verify_internal_key),
@@ -85,7 +89,9 @@ def sync_content(
 
 
 @router.delete("/sync/{content_id}")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 def delete_synced_content(
+    request: Request,
     content_id: str,
     db: Session = Depends(get_db),
     _verified: bool = Depends(_verify_internal_key),

@@ -202,6 +202,11 @@ def synthesize_speech(
 
 # ── Voice Clone Storage ───────────────────────────────────────────────────────
 
+def _safe_specialist_filename(specialist_name: str) -> str:
+    """يضمن أن اسم النموذج لا يحتوي على مسارات متنقلة (path traversal)."""
+    return Path(specialist_name).name.replace("..", "").strip() or "unknown"
+
+
 def save_voice_sample(
     specialist_name: str,
     audio_bytes: bytes
@@ -213,16 +218,22 @@ def save_voice_sample(
     samples_dir = Path(settings.XTTS_MODEL_PATH) / "voice_samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
 
-    sample_path = samples_dir / f"{specialist_name}.wav"
+    safe_name = _safe_specialist_filename(specialist_name)
+    sample_path = samples_dir / f"{safe_name}.wav"
+
+    if not sample_path.resolve().is_relative_to(samples_dir.resolve()):
+        raise ValueError(f"اسم النموذج غير صالح: {specialist_name}")
+
     sample_path.write_bytes(audio_bytes)
 
-    logger.info(f"✅ Voice sample saved for {specialist_name}")
+    logger.info(f"✅ Voice sample saved for {safe_name}")
     return str(sample_path)
 
 
 def get_voice_sample(specialist_name: str) -> Optional[bytes]:
     """يُرجع عينة الصوت المحفوظة للنموذج المتخصص"""
-    sample_path = Path(settings.XTTS_MODEL_PATH) / "voice_samples" / f"{specialist_name}.wav"
+    safe_name = _safe_specialist_filename(specialist_name)
+    sample_path = Path(settings.XTTS_MODEL_PATH) / "voice_samples" / f"{safe_name}.wav"
     if sample_path.exists():
         return sample_path.read_bytes()
     return None

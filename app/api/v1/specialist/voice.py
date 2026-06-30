@@ -8,7 +8,7 @@ Endpoints:
   POST /specialist/voice/ask         — شات صوتي كامل (STT + LLM + TTS)
 """
 import io
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from typing import Optional
 from app.db.session import get_db
 from app.core.deps import get_api_key_specialist
 from app.core.responses import success, AppError, ErrorCodes
+from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.models.specialist import SpecialistModel
 from app.services.voice.voice_service import (
     transcribe_audio,
@@ -83,7 +84,9 @@ def voice_status(db: Session = Depends(get_db)):
 # ── Transcribe (STT) ──────────────────────────────────────────────────────────
 
 @router.post("/transcribe")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 async def transcribe(
+    request:  Request,
     audio:    UploadFile = File(..., description="ملف الصوت (WAV/MP3/OGG/WebM)"),
     language: Optional[str] = Form(None, description="ar | en | None (كشف تلقائي)"),
     db:       Session = Depends(get_db),
@@ -93,6 +96,8 @@ async def transcribe(
     تحويل صوت → نص.
     يدعم العربية والإنجليزية وكل اللغات بكشف تلقائي.
     """
+    spec = _get_voice_specialist(db)
+
     if audio.content_type and audio.content_type not in SUPPORTED_AUDIO_TYPES:
         raise HTTPException(
             400,
@@ -111,7 +116,6 @@ async def transcribe(
         )
 
         # تحديث إحصائيات النموذج
-        spec = _get_voice_specialist(db)
         spec.total_requests = (spec.total_requests or 0) + 1
         db.commit()
 
@@ -132,7 +136,9 @@ async def transcribe(
 # ── Synthesize (TTS) ──────────────────────────────────────────────────────────
 
 @router.post("/synthesize")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 async def synthesize(
+    request:       Request,
     text:          str  = Form(..., description="النص المراد تحويله"),
     language:      str  = Form("ar", description="ar | en | fr | ..."),
     use_cloned:    bool = Form(False, description="استخدم الصوت المستنسَخ إن وُجد"),
@@ -184,7 +190,9 @@ async def synthesize(
 # ── Clone Voice ───────────────────────────────────────────────────────────────
 
 @router.post("/clone")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 async def clone_voice(
+    request: Request,
     sample:  UploadFile = File(..., description="عينة صوت مرجعية (WAV، 6-30 ثانية)"),
     db:      Session = Depends(get_db),
     _spec:   SpecialistModel = Depends(get_api_key_specialist),
@@ -232,7 +240,9 @@ class VoiceChatRequest(BaseModel):
 
 
 @router.post("/ask")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 async def voice_ask(
+    request: Request,
     payload: VoiceChatRequest,
     db:      Session = Depends(get_db),
     _spec:   SpecialistModel = Depends(get_api_key_specialist),

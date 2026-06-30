@@ -1,4 +1,7 @@
 """Seed script — YESARHA Core v3"""
+import os
+import secrets
+
 from app.db.session import SessionLocal, engine
 from app.db.session import Base
 from app.models import *  # noqa
@@ -16,9 +19,14 @@ def run():
     try:
         # ── Super Admin ──
         if not db.query(Admin).filter(Admin.email == "admin@yesarha.ai").first():
+            seed_password = os.environ.get("SEED_ADMIN_PASSWORD")
+            generated = seed_password is None
+            if generated:
+                seed_password = secrets.token_urlsafe(12)
+
             db.add(Admin(
                 email="admin@yesarha.ai",
-                password_hash=hash_password("AbdMoh@@00"),
+                password_hash=hash_password(seed_password),
                 full_name="Super Admin",
                 role="super_admin",
                 permissions=ALL_PERMISSIONS,
@@ -26,7 +34,10 @@ def run():
                 preferred_language="ar"
             ))
             db.commit()
-            print("✅ Created super_admin: admin@yesarha.ai / ***********")
+            if generated:
+                print(f"✅ Created super_admin: admin@yesarha.ai / {seed_password}  ← احفظها الآن، لن تُعرَض مجدداً، وغيّرها فوراً")
+            else:
+                print("✅ Created super_admin: admin@yesarha.ai / (SEED_ADMIN_PASSWORD من البيئة)")
         else:
             print("⚠️  Super admin exists, skipping.")
 
@@ -74,7 +85,6 @@ def run():
         print("\n🚀 YESARHA Core v3.0 is ready!")
         print("=" * 50)
         print("Admin:    admin@yesarha.ai")
-        # print("Password: AbdMoh@@00  ← غيّر فوراً!")
         print("Docs:     http://localhost:8000/docs")
         print("=" * 50)
 

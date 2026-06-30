@@ -8,7 +8,7 @@ Public Specialist API — للمستخدمين النهائيين عبر API Key
 """
 import json
 import time
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from typing import Optional
 from app.db.session import get_db
 from app.core.config import settings
 from app.core.responses import success
+from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.models.specialist import SpecialistModel, ModelPerformanceLog
 from app.services.ollama_client import OllamaClient
 from app.core.intelligence.async_bridge import sync_gen_to_async
@@ -36,7 +37,9 @@ def _sse(data: dict) -> str:
 
 
 @router.post("/ask")
+@limiter.limit(DEFAULT_RATE_LIMIT)
 async def ask_specialist(
+    request: Request,
     payload: PublicAskRequest,
     specialist: SpecialistModel = Depends(get_specialist_by_api_key),
     db: Session = Depends(get_db),

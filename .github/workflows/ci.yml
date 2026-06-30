@@ -1,0 +1,43 @@
+name: YESARHA Core — CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      DATABASE_URL: "sqlite:///./test_yesarha.db"
+      JWT_SECRET_KEY: "ci-test-secret-not-for-production"
+      INTERNAL_API_KEY: "ci-test-internal-key-12345"
+      SEED_ADMIN_PASSWORD: "CITestAdmin123!"
+      REDIS_URL: "redis://localhost:6379/0"
+      SEARXNG_URL: "http://localhost:8080"
+      OLLAMA_BASE_URL: "http://localhost:11434"
+      VRAM_TOTAL_GB: "8.0"
+      CORS_ORIGINS: '["*"]'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short
+
+      - name: Compile check all modules
+        run: python -m compileall app/ -q
