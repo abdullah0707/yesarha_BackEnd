@@ -10,7 +10,7 @@
 
 # PyTorch — CUDA 12.1 (RTX 4060)
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.3.1+cu121
+torch==2.12.1
 torchaudio==2.3.1+cu121
 
 # Whisper + TTS
