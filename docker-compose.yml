@@ -97,6 +97,13 @@ services:
     volumes:
       - ./data:/app/data
       - voice_models:/app/data/xtts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
 
 volumes:

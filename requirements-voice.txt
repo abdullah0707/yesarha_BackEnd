@@ -1,20 +1,18 @@
 # Voice Specialist dependencies — تُثبَّت فقط لو VOICE_INSTALL=true
 # الحجم الكلي ~4-6 GB (torch + whisper + TTS)
 #
-# تثبيت داخل Container جاهز:
-#   docker exec -it yesarha_backend bash
-#   pip install -r requirements-voice.txt
+# تثبيت داخل Container الشغّال (للتجربة السريعة):
+#   docker exec yesarha_backend pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   docker exec yesarha_backend pip install openai-whisper TTS
 #
-# أو عبر Docker build:
+# أو عبر Docker build (دائم):
 #   docker compose build --build-arg VOICE_INSTALL=true backend
 
-# PyTorch — CUDA 12.1 (RTX 4060 / Ampere+)
+# PyTorch — CUDA 12.1 (RTX 4060)
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch==2.3.1+cu121
 torchaudio==2.3.1+cu121
 
-# Whisper — Speech-to-Text
+# Whisper + TTS
 openai-whisper==20231117
-
-# XTTS-v2 — Text-to-Speech + Voice Cloning
 TTS==0.22.0
