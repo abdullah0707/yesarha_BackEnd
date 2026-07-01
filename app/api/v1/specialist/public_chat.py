@@ -15,13 +15,16 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.db.session import get_db
-from app.core.config import settings
 from app.core.responses import success
 from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.models.specialist import SpecialistModel, ModelPerformanceLog
 from app.services.ollama_client import OllamaClient
+from app.services.runtime_config import runtime_cfg
 from app.core.intelligence.async_bridge import sync_gen_to_async
 from app.core.intelligence.api_keys import get_specialist_by_api_key
+from app.core.prompts import build_system_prompt
+
+_SPEED_OPTIONS = {"temperature": 0.1, "num_predict": 1024}
 
 router = APIRouter(prefix="/specialist", tags=["Public - Specialist API"])
 
@@ -55,14 +58,18 @@ async def ask_specialist(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
 
-    client = OllamaClient(base_url=settings.OLLAMA_BASE_URL)
-    messages = [{"role": "system", "content": specialist.system_prompt or ""}]
+    client = OllamaClient()
+    messages = [{"role": "system", "content": build_system_prompt(specialist.system_prompt or "")}]
     if payload.history:
-        messages.extend(payload.history)
+        messages.extend(payload.history[-6:])
     messages.append({"role": "user", "content": payload.message})
 
     start = time.perf_counter()
-    result = client.chat(model=specialist.base_model or settings.CORE_MODEL, messages=messages)
+    result = client.chat(
+        model=specialist.base_model or runtime_cfg.get_core_model(),
+        messages=messages,
+        options=_SPEED_OPTIONS,
+    )
     response_ms = int((time.perf_counter() - start) * 1000)
 
     _log_and_count(db, specialist, payload.message, result["content"], response_ms)
@@ -75,10 +82,10 @@ async def ask_specialist(
 
 
 async def _stream_response(payload: PublicAskRequest, specialist: SpecialistModel, db: Session):
-    client = OllamaClient(base_url=settings.OLLAMA_BASE_URL)
-    messages = [{"role": "system", "content": specialist.system_prompt or ""}]
+    client = OllamaClient()
+    messages = [{"role": "system", "content": build_system_prompt(specialist.system_prompt or "")}]
     if payload.history:
-        messages.extend(payload.history)
+        messages.extend(payload.history[-6:])
     messages.append({"role": "user", "content": payload.message})
 
     full_response = ""
@@ -86,8 +93,9 @@ async def _stream_response(payload: PublicAskRequest, specialist: SpecialistMode
 
     async for chunk in sync_gen_to_async(
         client.chat_stream,
-        model=specialist.base_model or settings.CORE_MODEL,
+        model=specialist.base_model or runtime_cfg.get_core_model(),
         messages=messages,
+        options=_SPEED_OPTIONS,
     ):
         if chunk["type"] == "token":
             full_response += chunk["content"]

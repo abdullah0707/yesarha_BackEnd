@@ -7,66 +7,86 @@ from app.db.session import get_db
 from app.core.deps import get_current_admin
 from app.core.responses import success, paginated
 from app.utils.listing import ListParams, apply_sort, apply_pagination
-from app.models.operations import Execution, Goal
-from app.models.ai import AIModel, Agent
+from app.models.specialist import SpecialistModel, ModelPerformanceLog
 
 router = APIRouter(prefix="/admin/analytics", tags=["Admin - Analytics"])
 
 
-@router.get("/tool-performance")
-def tool_performance(
+@router.get("/specialist-performance")
+def specialist_performance(
     days: int = 30,
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin)
 ):
+    """أداء النماذج المتخصصة — نجاح/فشل/متوسط زمن الاستجابة"""
     since = datetime.utcnow() - timedelta(days=days)
 
     rows = db.query(
-        Execution.tool,
-        Execution.status,
-        func.count(Execution.id).label("count")
+        ModelPerformanceLog.model_id,
+        ModelPerformanceLog.status,
+        func.count(ModelPerformanceLog.id).label("count"),
+        func.avg(ModelPerformanceLog.response_ms).label("avg_ms"),
     ).filter(
-        Execution.created_at >= since
-    ).group_by(Execution.tool, Execution.status).all()
+        ModelPerformanceLog.created_at >= since
+    ).group_by(ModelPerformanceLog.model_id, ModelPerformanceLog.status).all()
 
-    # build per-tool summary
-    tools: dict = {}
+    # aggregate per model
+    models: dict = {}
     for row in rows:
-        tool = row.tool or "unknown"
-        if tool not in tools:
-            tools[tool] = {"tool": tool, "success": 0, "failed": 0, "total": 0}
-        tools[tool][row.status] = tools[tool].get(row.status, 0) + row.count
-        tools[tool]["total"] += row.count
+        mid = row.model_id
+        if mid not in models:
+            models[mid] = {"model_id": mid, "success": 0, "failed": 0, "total": 0, "avg_ms": 0}
+        models[mid][row.status] = models[mid].get(row.status, 0) + row.count
+        models[mid]["total"] += row.count
+        if row.status == "success" and row.avg_ms:
+            models[mid]["avg_ms"] = round(float(row.avg_ms), 1)
 
-    for t in tools.values():
-        t["success_rate"] = round(
-            t["success"] / t["total"] * 100, 1
-        ) if t["total"] > 0 else 0
+    # enrich with model names
+    all_ids = list(models.keys())
+    spec_map = {
+        s.id: s for s in db.query(SpecialistModel).filter(SpecialistModel.id.in_(all_ids)).all()
+    } if all_ids else {}
 
-    return success(list(tools.values()))
+    result = []
+    for mid, data in models.items():
+        spec = spec_map.get(mid)
+        data["success_rate"] = round(data["success"] / data["total"] * 100, 1) if data["total"] > 0 else 0
+        data["name"] = spec.name if spec else f"model_{mid}"
+        data["display_name"] = spec.display_name if spec else f"Model {mid}"
+        data["specialization"] = spec.specialization if spec else "unknown"
+        result.append(data)
+
+    result.sort(key=lambda x: x["total"], reverse=True)
+    return success(result)
 
 
-@router.get("/intent-distribution")
-def intent_distribution(
+@router.get("/request-distribution")
+def request_distribution(
     days: int = 30,
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin)
 ):
+    """توزيع الطلبات حسب التخصص"""
     since = datetime.utcnow() - timedelta(days=days)
 
     rows = db.query(
-        Execution.intent,
-        func.count(Execution.id).label("count")
+        ModelPerformanceLog.model_id,
+        func.count(ModelPerformanceLog.id).label("count")
     ).filter(
-        Execution.created_at >= since,
-        Execution.intent.isnot(None)
-    ).group_by(Execution.intent).order_by(desc("count")).all()
+        ModelPerformanceLog.created_at >= since
+    ).group_by(ModelPerformanceLog.model_id).order_by(desc("count")).all()
 
     total = sum(r.count for r in rows)
+    all_ids = [r.model_id for r in rows]
+    spec_map = {
+        s.id: s for s in db.query(SpecialistModel).filter(SpecialistModel.id.in_(all_ids)).all()
+    } if all_ids else {}
+
     data = [{
-        "intent": r.intent,
-        "count": r.count,
-        "percent": round(r.count / total * 100, 1) if total > 0 else 0
+        "specialization": spec_map[r.model_id].specialization if r.model_id in spec_map else "unknown",
+        "display_name":   spec_map[r.model_id].display_name   if r.model_id in spec_map else f"Model {r.model_id}",
+        "count":   r.count,
+        "percent": round(r.count / total * 100, 1) if total > 0 else 0,
     } for r in rows]
 
     return success(data)
@@ -79,22 +99,29 @@ def failures(
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin)
 ):
+    """سجل الطلبات الفاشلة للنماذج المتخصصة"""
     since = datetime.utcnow() - timedelta(days=days)
 
-    query = db.query(Execution).filter(
-        Execution.status == "failed",
-        Execution.created_at >= since
+    query = db.query(ModelPerformanceLog).filter(
+        ModelPerformanceLog.status == "failed",
+        ModelPerformanceLog.created_at >= since
     )
-    query = apply_sort(query, Execution, params.sort or "-created_at", default_field="id")
+    query = apply_sort(query, ModelPerformanceLog, params.sort or "-created_at", default_field="id")
     items, total = apply_pagination(query, params)
 
+    all_ids = list({item.model_id for item in items})
+    spec_map = {
+        s.id: s for s in db.query(SpecialistModel).filter(SpecialistModel.id.in_(all_ids)).all()
+    } if all_ids else {}
+
     data = [{
-        "id": e.id,
-        "intent": e.intent,
-        "tool": e.tool,
-        "tool_input": e.tool_input,
-        "result": e.result,
-        "created_at": e.created_at.isoformat()
+        "id":           e.id,
+        "model_id":     e.model_id,
+        "model_name":   spec_map[e.model_id].name if e.model_id in spec_map else f"model_{e.model_id}",
+        "prompt_tokens": e.tokens_input,
+        "response_ms":  e.response_ms,
+        "error":        e.error_message,
+        "created_at":   e.created_at.isoformat(),
     } for e in items]
 
     return paginated(data, params.page, params.limit, total)
@@ -105,90 +132,63 @@ def insights(
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin)
 ):
-    since_7d = datetime.utcnow() - timedelta(days=7)
+    """تحليلات واقتراحات بناءً على أداء النماذج"""
+    since_7d  = datetime.utcnow() - timedelta(days=7)
     since_30d = datetime.utcnow() - timedelta(days=30)
 
-    total = db.query(Execution).filter(Execution.created_at >= since_30d).count()
-    failed = db.query(Execution).filter(
-        Execution.created_at >= since_30d,
-        Execution.status == "failed"
+    total_30d  = db.query(ModelPerformanceLog).filter(ModelPerformanceLog.created_at >= since_30d).count()
+    failed_30d = db.query(ModelPerformanceLog).filter(
+        ModelPerformanceLog.created_at >= since_30d,
+        ModelPerformanceLog.status == "failed"
     ).count()
 
-    active_models = db.query(AIModel).filter(AIModel.status == "active").count()
-    active_agents = db.query(Agent).filter(Agent.status == "active").count()
-
-    recent_executions = db.query(Execution).filter(
-        Execution.created_at >= since_7d
-    ).count()
+    active_specialists = db.query(SpecialistModel).filter(SpecialistModel.status == "active").count()
+    total_specialists  = db.query(SpecialistModel).count()
+    recent_7d = db.query(ModelPerformanceLog).filter(ModelPerformanceLog.created_at >= since_7d).count()
 
     insights_list = []
 
-    if total > 0:
-        fail_rate = failed / total * 100
+    if total_30d > 0:
+        fail_rate = failed_30d / total_30d * 100
         if fail_rate > 20:
             insights_list.append({
                 "type": "warning",
-                "title": {"ar": "معدل فشل مرتفع", "en": "High Failure Rate"},
-                "message": {"ar": f"معدل الفشل {fail_rate:.1f}% خلال آخر 30 يوم — راجع سجلات الأخطاء",
-                            "en": f"Failure rate is {fail_rate:.1f}% over the last 30 days — check error logs"}
+                "title":   {"ar": "معدل فشل مرتفع",      "en": "High Failure Rate"},
+                "message": {"ar": f"معدل الفشل {fail_rate:.1f}% خلال آخر 30 يوم",
+                            "en": f"Failure rate is {fail_rate:.1f}% over the last 30 days"},
             })
 
-    if active_models == 0:
+    if active_specialists == 0:
         insights_list.append({
             "type": "error",
-            "title": {"ar": "لا يوجد نموذج نشط", "en": "No Active Model"},
-            "message": {"ar": "لا يوجد أي نموذج ذكاء اصطناعي نشط — قم بتفعيل نموذج أولاً",
-                        "en": "No active AI model found — please activate a model first"}
+            "title":   {"ar": "لا يوجد نموذج متخصص نشط", "en": "No Active Specialist"},
+            "message": {"ar": "أنشئ نموذجاً متخصصاً وفعّله من لوحة التحكم",
+                        "en": "Create a specialist model and activate it from the dashboard"},
         })
-
-    if active_agents < 3:
+    elif active_specialists < total_specialists:
+        inactive = total_specialists - active_specialists
         insights_list.append({
             "type": "info",
-            "title": {"ar": "وكلاء غير مكتملة", "en": "Incomplete Agents"},
-            "message": {"ar": f"يوجد {active_agents} وكيل نشط فقط — يُنصح بتفعيل Planner+Executor+Critic",
-                        "en": f"Only {active_agents} active agent(s) — recommended: Planner+Executor+Critic"}
+            "title":   {"ar": "نماذج غير نشطة",    "en": "Inactive Specialists"},
+            "message": {"ar": f"{inactive} نموذج غير نشط — راجع حالتها",
+                        "en": f"{inactive} specialist(s) are not active — check their status"},
         })
 
-    if recent_executions > 0 and not insights_list:
+    if recent_7d > 0 and not insights_list:
         insights_list.append({
             "type": "success",
-            "title": {"ar": "النظام يعمل بشكل جيد", "en": "System Running Well"},
-            "message": {"ar": f"{recent_executions} تنفيذ خلال آخر 7 أيام دون مشاكل",
-                        "en": f"{recent_executions} executions in the last 7 days without issues"}
+            "title":   {"ar": "النظام يعمل بشكل جيد", "en": "System Running Well"},
+            "message": {"ar": f"{recent_7d} طلب خلال آخر 7 أيام",
+                        "en": f"{recent_7d} requests in the last 7 days"},
         })
 
     return success({
         "insights": insights_list,
         "stats_30d": {
-            "total_executions": total,
-            "failed_executions": failed,
-            "failure_rate_percent": round(failed / total * 100, 1) if total > 0 else 0,
-            "active_models": active_models,
-            "active_agents": active_agents
-        }
+            "total_requests":       total_30d,
+            "failed_requests":      failed_30d,
+            "failure_rate_percent": round(failed_30d / total_30d * 100, 1) if total_30d > 0 else 0,
+            "active_specialists":   active_specialists,
+            "total_specialists":    total_specialists,
+        },
     })
-
-
-@router.get("/goals")
-def list_goals(
-    params: ListParams = Depends(),
-    status: str | None = None,
-    db: Session = Depends(get_db),
-    _admin=Depends(get_current_admin)
-):
-    query = db.query(Goal)
-    if status:
-        query = query.filter(Goal.status == status)
-
-    query = apply_sort(query, Goal, params.sort or "-created_at", default_field="id")
-    items, total = apply_pagination(query, params)
-
-    data = [{
-        "id": g.id,
-        "title": g.title,
-        "status": g.status,
-        "priority": g.priority,
-        "created_at": g.created_at.isoformat()
-    } for g in items]
-
-    return paginated(data, params.page, params.limit, total)

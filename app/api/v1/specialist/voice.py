@@ -26,7 +26,6 @@ from app.services.voice.voice_service import (
     get_voice_sample,
     is_voice_ready,
 )
-from app.core.config import settings
 
 router = APIRouter(prefix="/specialist/voice", tags=["Specialist - Voice"])
 
@@ -254,16 +253,24 @@ async def voice_ask(
     from app.services.ollama_client import OllamaClient
 
     spec = _get_voice_specialist(db)
-    client = OllamaClient(base_url=settings.OLLAMA_BASE_URL)
+    client = OllamaClient()   # يقرأ URL من runtime_cfg تلقائياً
+
+    from app.core.prompts import build_system_prompt
+    try:
+        from app.services.runtime_config import runtime_cfg
+        core_model = runtime_cfg.get_core_model()
+    except Exception:
+        from app.core.config import settings
+        core_model = settings.CORE_MODEL
 
     messages = [
-        {"role": "system", "content": spec.system_prompt or "أنت مساعد صوتي من يسرها."},
+        {"role": "system", "content": build_system_prompt(spec.system_prompt or "أنت مساعد صوتي ذكي من يسرها.")},
         {"role": "user",   "content": payload.message},
     ]
 
     # LLM Response
     llm_result = client.chat(
-        model=spec.base_model or settings.CORE_MODEL,
+        model=spec.base_model or core_model,
         messages=messages
     )
     response_text = llm_result.get("content", "")

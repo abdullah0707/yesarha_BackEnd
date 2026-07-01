@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     VRAM_TOTAL_GB: float = 8.0
 
     # Voice Specialist (Phase 3)
-    WHISPER_MODEL: str = "large-v3"          # large-v3 أفضل دقة، base للأجهزة الضعيفة
+    WHISPER_MODEL: str = "small"             # small آمن مع 8GB VRAM — يُرفع لـ medium/large-v3 من Runtime Config
     XTTS_MODEL_PATH: str = "data/xtts"       # مجلد تخزين نماذج الصوت وعينات الاستنساخ
     VOICE_SAMPLE_MIN_SECONDS: float = 6.0    # الحد الأدنى لعينة الاستنساخ
     VRAM_CORE_RESERVED_GB: float = 5.5    # محجوز لـ Core دائماً

@@ -27,27 +27,46 @@ _xtts_model    = None
 _xtts_config   = None
 
 
+def _get_whisper_model_name() -> str:
+    """يقرأ حجم Whisper من runtime_cfg (قابل للتغيير من Dashboard بدون restart)"""
+    try:
+        from app.services.runtime_config import runtime_cfg
+        return runtime_cfg.get("WHISPER_MODEL") or settings.WHISPER_MODEL
+    except Exception:
+        return settings.WHISPER_MODEL
+
+
 def _get_whisper():
-    """تحميل Whisper عند أول استخدام"""
+    """
+    تحميل Whisper عند أول استخدام (lazy loading).
+    يتحقق من runtime_cfg لمعرفة الحجم المطلوب — لو تغيّر يُعيد التحميل.
+    """
     global _whisper_model
+    model_name = _get_whisper_model_name()
+
+    # إعادة تحميل لو تغيّر الحجم من Dashboard
     if _whisper_model is not None:
-        return _whisper_model
+        current_name = getattr(_whisper_model, "_model_name", model_name)
+        if current_name == model_name:
+            return _whisper_model
+        logger.info(f"Whisper model changed → {model_name}, reloading...")
+        _whisper_model = None
 
     try:
         import whisper
-        logger.info(f"Loading Whisper {settings.WHISPER_MODEL}...")
-        _whisper_model = whisper.load_model(
-            settings.WHISPER_MODEL,
+        logger.info(f"Loading Whisper '{model_name}'...")
+        model = whisper.load_model(
+            model_name,
             device="cuda" if _has_cuda() else "cpu"
         )
-        logger.info("✅ Whisper loaded")
+        model._model_name = model_name   # tag للمقارنة لاحقاً
+        _whisper_model = model
+        logger.info(f"✅ Whisper '{model_name}' loaded")
         return _whisper_model
     except ImportError:
-        raise RuntimeError(
-            "Whisper غير مثبَّت. شغّل: pip install openai-whisper"
-        )
+        raise RuntimeError("Whisper غير مثبَّت — تأكد من VOICE_INSTALL=true عند Docker build")
     except Exception as e:
-        raise RuntimeError(f"فشل تحميل Whisper: {e}")
+        raise RuntimeError(f"فشل تحميل Whisper '{model_name}': {e}")
 
 
 def _get_xtts():
@@ -248,7 +267,7 @@ def is_voice_ready() -> dict:
         "whisper_available": False,
         "xtts_available":    False,
         "cuda_available":    _has_cuda(),
-        "whisper_model":     settings.WHISPER_MODEL,
+        "whisper_model":     _get_whisper_model_name(),
         "message":           "",
     }
 

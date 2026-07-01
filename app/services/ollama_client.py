@@ -10,10 +10,20 @@ from app.core.config import settings
 from app.core.responses import AppError, ErrorCodes
 
 
+def _resolve_ollama_url(base_url: Optional[str]) -> str:
+    if base_url:
+        return base_url.rstrip("/")
+    try:
+        from app.services.runtime_config import runtime_cfg
+        return runtime_cfg.get_ollama_url().rstrip("/")
+    except Exception:
+        return settings.OLLAMA_BASE_URL.rstrip("/")
+
+
 class OllamaClient:
 
     def __init__(self, base_url: Optional[str] = None):
-        self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
+        self.base_url = _resolve_ollama_url(base_url)
 
     # ── Non-streaming ─────────────────────────────────────────────
 

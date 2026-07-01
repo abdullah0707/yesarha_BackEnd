@@ -15,26 +15,43 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.db.session import get_db
-from app.core.config import settings
 from app.core.responses import success, AppError, ErrorCodes
 from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.models.specialist import SpecialistModel
 from app.models.education import SyncedContent, StudentQuestion
 from app.services.education.retriever import retrieve_relevant_chunks, build_context_from_chunks
 from app.services.ollama_client import OllamaClient
+from app.services.runtime_config import runtime_cfg
 from app.core.intelligence.async_bridge import sync_gen_to_async
 from app.core.intelligence.api_keys import get_specialist_by_api_key
+from app.core.prompts import build_system_prompt
+
+_SPEED_OPTIONS = {"temperature": 0.1, "num_predict": 1024}
 
 router = APIRouter(prefix="/specialist/education", tags=["Public - Education"])
 
 
-DEFAULT_EDUCATION_PROMPT = """أنت مساعد تعليمي ذكي من يسرها. مهمتك شرح محتوى الدرس للمتعلم والإجابة على أسئلته.
+DEFAULT_EDUCATION_PROMPT = """\
+أنت مساعد تعليمي ذكي من يسرها. مهمتك شرح محتوى الدرس للمتعلم والإجابة على أسئلته.
+You are an intelligent educational assistant from Yesarha. Your task is to explain lesson content and answer learner questions.
 
-قواعد صارمة:
-- أجب فقط بناءً على محتوى الدرس المرفق أدناه. لا تستخدم معلومات من خارجه.
-- إذا كان السؤال خارج نطاق المحتوى المرفق، أخبر المتعلم بوضوح أن هذا غير مذكور في الدرس الحالي.
+قاعدة اللغة — إلزامية / Language Rule — Mandatory:
+- اكتشف لغة سؤال المتعلم وأجب بنفس اللغة تماماً بدون استثناء.
+- Detect the learner's question language and reply in that exact language — no exceptions.
+- سؤال عربي → رد عربي كامل | Arabic question → full Arabic reply
+- سؤال إنجليزي → رد إنجليزي كامل | English question → full English reply
+
+قواعد المحتوى — إلزامية:
+- أجب فقط بناءً على محتوى الدرس المرفق. لا تستخدم معلومات من خارجه.
+- إذا كان السؤال خارج نطاق المحتوى، أخبر المتعلم بوضوح بذلك.
 - اشرح بأسلوب بسيط وواضح يناسب متعلماً لأول مرة.
-- استخدم أمثلة من المحتوى نفسه عند الشرح."""
+- استخدم أمثلة من المحتوى نفسه عند الشرح.
+
+Content Rules — Mandatory:
+- Answer ONLY based on the provided lesson content. Do not use outside information.
+- If the question is outside the lesson scope, clearly inform the learner.
+- Explain in simple, clear language suitable for a first-time learner.
+- Use examples from the content itself when explaining."""
 
 
 class AskRequest(BaseModel):
@@ -71,7 +88,7 @@ def ask_question(
     relevant = retrieve_relevant_chunks(chunks, payload.question, top_k=3)
     context = build_context_from_chunks(relevant)
 
-    system_prompt = specialist.system_prompt or DEFAULT_EDUCATION_PROMPT
+    system_prompt = build_system_prompt(specialist.system_prompt or DEFAULT_EDUCATION_PROMPT)
     full_system = f"{system_prompt}\n\n## محتوى الدرس ذو الصلة:\n{context}"
 
     messages = [
@@ -86,9 +103,13 @@ def ask_question(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
 
-    client = OllamaClient(base_url=settings.OLLAMA_BASE_URL)
+    client = OllamaClient()
     start = time.perf_counter()
-    result = client.chat(model=specialist.base_model or settings.CORE_MODEL, messages=messages)
+    result = client.chat(
+        model=specialist.base_model or runtime_cfg.get_core_model(),
+        messages=messages,
+        options=_SPEED_OPTIONS,
+    )
     response_ms = int((time.perf_counter() - start) * 1000)
 
     _log_question(db, payload, specialist, result["content"], relevant, response_ms)
@@ -102,14 +123,17 @@ def ask_question(
 
 async def _stream_answer(messages, payload: AskRequest, specialist: SpecialistModel,
                           relevant: list[dict], db: Session):
-    client = OllamaClient(base_url=settings.OLLAMA_BASE_URL)
+    client = OllamaClient()
     full_response = ""
     start = time.perf_counter()
 
     yield _sse({"type": "context", "used_sections": [c["section"] for c in relevant]})
 
     async for chunk in sync_gen_to_async(
-        client.chat_stream, model=specialist.base_model or settings.CORE_MODEL, messages=messages
+        client.chat_stream,
+        model=specialist.base_model or runtime_cfg.get_core_model(),
+        messages=messages,
+        options=_SPEED_OPTIONS,
     ):
         if chunk["type"] == "token":
             full_response += chunk["content"]

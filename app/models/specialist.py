@@ -33,6 +33,13 @@ class SpecialistModel(Base):
     content_source_api_key = Column(String, nullable=True)       # مفتاح المصادقة عند الاتصال بهذا المصدر (إن وُجد)
     uses_external_content = Column(Boolean, default=False)       # هل هذا النموذج يعتمد على مصدر بيانات خارجي؟
 
+    # دور النموذج في المنظومة (أساس Phase A — Orchestrator)
+    agent_role = Column(String, default="specialist")
+    # "specialist"   — نموذج متخصص يُستدعى من الـ Orchestrator
+    # "orchestrator" — العقل المركزي الذي يُحلّل ويُوجّه (Phase A)
+    # "hybrid"       — يعمل بالدورين حسب السياق
+    can_call_specialists = Column(JSON, default=list)           # قائمة IDs المتخصصين الذين يمكن لهذا النموذج استدعاؤهم
+
     # الحالة
     status = Column(String, default="creating")
     # creating | downloading | training | active | inactive | error
@@ -51,6 +58,31 @@ class SpecialistModel(Base):
     training_data_sources = Column(JSON, default=list)           # مصادر التدريب من البحث
     last_trained_at = Column(DateTime, nullable=True)
     next_training_at = Column(DateTime, nullable=True)           # التدريب الأسبوعي التالي
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SpecialistBundle(Base):
+    """
+    حزمة نماذج متخصصة تحت مفتاح API واحد.
+    Admin يُنشئها من لوحة التحكم، يختار النماذج، النظام يُولّد المفتاح.
+    """
+    __tablename__ = "specialist_bundles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    api_key = Column(String, nullable=True, unique=True, index=True)
+
+    # قائمة IDs النماذج المتخصصة في هذه الحزمة — JSON Array
+    specialist_ids = Column(JSON, default=list)
+
+    # هل يمر الطلب عبر الـ Orchestrator لتحديد المتخصص تلقائياً؟
+    use_orchestrator = Column(Boolean, default=True)
+
+    status = Column(String, default="active")       # active | inactive
+    total_requests = Column(Integer, default=0)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

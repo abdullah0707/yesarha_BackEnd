@@ -21,16 +21,16 @@ from app.api.v1.public.manifest import router as manifest_router
 
 # Admin
 from app.api.v1.admin.users import router as admins_router
-from app.api.v1.admin.models import router as models_router
-from app.api.v1.admin.agents import router as agents_router
 from app.api.v1.admin.dashboard import router as dashboard_router
 from app.api.v1.admin.analytics import router as analytics_router
 from app.api.v1.admin.system import router as system_router
-from app.api.v1.admin.test_tools import router as test_tools_router
 from app.api.v1.admin.specialists import router as specialists_router
 from app.api.v1.admin.synced_content import router as synced_content_router
 from app.api.v1.admin.core_settings import router as core_settings_router
 from app.api.v1.admin.monitor import router as monitor_router
+from app.api.v1.admin.bundles import router as bundles_router
+from app.api.v1.admin.runtime_config import router as runtime_config_router
+from app.api.v1.admin.connections import router as connections_router
 
 # Core Intelligence
 from app.api.v1.core.chat import router as core_chat_router
@@ -40,20 +40,9 @@ from app.api.v1.specialist.education import router as education_router
 from app.api.v1.specialist.public_chat import router as public_specialist_router
 from app.api.v1.specialist.content_sync import router as content_sync_router
 from app.api.v1.specialist.voice import router as voice_router
-
-# Phase 5 — Users & Billing
-from app.api.v1.public.user_auth import router as user_auth_router
-from app.api.v1.public.plans import router as public_plans_router
-from app.api.v1.public.wallet import router as wallet_router
-from app.api.v1.public.payments import router as payments_router
-from app.api.v1.public.chat import router as user_chat_router
-from app.api.v1.public.run import router as run_router
-from app.api.v1.admin.plans import router as admin_plans_router
-from app.api.v1.admin.subscriptions import router as subscriptions_router
-from app.api.v1.admin.ledger import router as ledger_router
-from app.api.v1.admin.credit_policy import router as credit_policy_router
-from app.api.v1.admin.service_pricing import router as service_pricing_router
-from app.api.v1.admin.end_users import router as end_users_router
+from app.api.v1.specialist.vision import router as vision_router
+from app.api.v1.specialist.bundle_chat import router as bundle_chat_router
+from app.api.v1.specialist.orchestrate import router as orchestrate_router
 
 
 @asynccontextmanager
@@ -62,6 +51,17 @@ async def lifespan(app: FastAPI):
     # ── Startup ──
     from app.core.intelligence.auto_monitor import core_monitor
     from app.services.scheduler import start_scheduler, stop_scheduler
+    from app.services.runtime_config import runtime_cfg
+    from app.db.session import SessionLocal
+
+    # تحميل الإعدادات الديناميكية من DB مرة واحدة عند البدء
+    try:
+        db = SessionLocal()
+        runtime_cfg.initialize(db)
+        db.close()
+    except Exception as e:
+        import logging
+        logging.getLogger("runtime_config").warning(f"Runtime config init failed: {e}")
 
     core_monitor.start()
     start_scheduler()
@@ -114,35 +114,24 @@ def create_app() -> FastAPI:
     app.include_router(auth_router,              prefix=p)
     app.include_router(manifest_router,          prefix=p)
     app.include_router(admins_router,            prefix=p)
-    app.include_router(models_router,            prefix=p)
-    app.include_router(agents_router,            prefix=p)
     app.include_router(dashboard_router,         prefix=p)
     app.include_router(analytics_router,         prefix=p)
     app.include_router(system_router,            prefix=p)
-    app.include_router(test_tools_router,        prefix=p)
     app.include_router(specialists_router,       prefix=p)
     app.include_router(synced_content_router,    prefix=p)
     app.include_router(core_settings_router,     prefix=p)
     app.include_router(monitor_router,           prefix=p)
+    app.include_router(bundles_router,           prefix=p)
+    app.include_router(runtime_config_router,    prefix=p)
+    app.include_router(connections_router,       prefix=p)
     app.include_router(core_chat_router,         prefix=p)
     app.include_router(education_router,         prefix=p)
     app.include_router(public_specialist_router, prefix=p)
     app.include_router(content_sync_router,      prefix=p)
     app.include_router(voice_router,             prefix=p)
-
-    # Phase 5 — Users & Billing
-    app.include_router(user_auth_router,         prefix=p)
-    app.include_router(public_plans_router,      prefix=p)
-    app.include_router(wallet_router,            prefix=p)
-    app.include_router(payments_router,          prefix=p)
-    app.include_router(user_chat_router,         prefix=p)
-    app.include_router(run_router,               prefix=p)
-    app.include_router(admin_plans_router,       prefix=p)
-    app.include_router(subscriptions_router,     prefix=p)
-    app.include_router(ledger_router,            prefix=p)
-    app.include_router(credit_policy_router,     prefix=p)
-    app.include_router(service_pricing_router,   prefix=p)
-    app.include_router(end_users_router,         prefix=p)
+    app.include_router(vision_router,            prefix=p)
+    app.include_router(bundle_chat_router,       prefix=p)
+    app.include_router(orchestrate_router,       prefix=p)
 
     return app
 

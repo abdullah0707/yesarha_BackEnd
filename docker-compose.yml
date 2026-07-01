@@ -90,7 +90,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change_internal_key}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
       CORS_ORIGINS: '["*"]'
-      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
       XTTS_MODEL_PATH: /app/data/xtts
     ports:
       - "8000:8000"
