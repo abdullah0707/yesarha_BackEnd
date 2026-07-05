@@ -21,7 +21,7 @@ from app.db.session import get_db
 from app.core.rate_limit import limiter, DEFAULT_RATE_LIMIT
 from app.core.responses import success
 from app.core.prompts import build_system_prompt
-from app.models.specialist import SpecialistBundle, SpecialistModel, ModelPerformanceLog
+from app.models.specialist import SpecialistBundle, SpecialistModel, ModelPerformanceLog, GatewayRequestLog
 from app.services.ollama_client import OllamaClient
 from app.core.intelligence.async_bridge import sync_gen_to_async
 from app.core.intelligence.api_keys import get_bundle_by_api_key
@@ -217,7 +217,11 @@ def _call_specialist(
 
         # تسجيل الأداء
         try:
-            specialist.total_requests = (specialist.total_requests or 0) + 1
+            n = (specialist.total_requests or 0) + 1
+            specialist.total_requests = n
+            specialist.avg_response_ms = int(
+                ((specialist.avg_response_ms or 0) * (n - 1) + response_ms) / n
+            )
             db.add(ModelPerformanceLog(
                 model_id=specialist.id,
                 model_name=specialist.name,
@@ -249,6 +253,34 @@ def _call_specialist(
         except Exception:
             db.rollback()
         return "", 0
+
+
+# ── Gateway Logging ───────────────────────────────────────────────────────────
+
+def _log_gateway(
+    db: Session,
+    bundle: SpecialistBundle,
+    api_key: str,
+    specialists_used: list[str],
+    response_ms: int,
+    status: str,
+    ip: str | None,
+):
+    """يُسجِّل كل طلب bundle في GatewayRequestLog"""
+    try:
+        db.add(GatewayRequestLog(
+            key_prefix=api_key[:24] if api_key else "unknown",
+            key_type="bundle",
+            bundle_id=bundle.id,
+            endpoint="/specialist/bundle/ask",
+            specialists_used=specialists_used,
+            response_ms=response_ms,
+            status=status,
+            ip_address=ip,
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 # ── Request Schema ─────────────────────────────────────────────────────────────
@@ -313,8 +345,11 @@ async def ask_bundle(
 
     # ── Streaming: مسار سريع لمتخصص واحد ──
     if payload.stream and len(selected) == 1:
+        api_key = request.headers.get("X-API-Key", "")
+        client_ip = request.client.host if request.client else None
         return StreamingResponse(
-            _stream_single(selected[0], payload, db, routing, start_total),
+            _stream_single(selected[0], payload, db, routing, start_total,
+                           bundle=bundle, api_key=api_key, client_ip=client_ip),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -354,6 +389,15 @@ async def ask_bundle(
     total_ms = int((time.perf_counter() - start_total) * 1000)
     failed = [s.specialization for s in selected if s.specialization not in valid_results]
 
+    _log_gateway(
+        db, bundle,
+        api_key=request.headers.get("X-API-Key", ""),
+        specialists_used=list(valid_results.keys()),
+        response_ms=total_ms,
+        status="success" if valid_results else "failed",
+        ip=request.client.host if request.client else None,
+    )
+
     return success({
         "answer": final_answer,
         "specialists_used": list(valid_results.keys()),
@@ -378,6 +422,10 @@ async def _stream_single(
     db: Session,
     routing: dict,
     start_total: float,
+    *,
+    bundle: SpecialistBundle | None = None,
+    api_key: str = "",
+    client_ip: str | None = None,
 ):
     """SSE streaming لحالة متخصص واحد — أسرع وأكثر تفاعلية"""
     yield _sse({
@@ -436,9 +484,13 @@ async def _stream_single(
                 })
                 yield "data: [DONE]\n\n"
 
-                # تسجيل
+                # تسجيل أداء النموذج
                 try:
-                    specialist.total_requests = (specialist.total_requests or 0) + 1
+                    n = (specialist.total_requests or 0) + 1
+                    specialist.total_requests = n
+                    specialist.avg_response_ms = int(
+                        ((specialist.avg_response_ms or 0) * (n - 1) + response_ms) / n
+                    )
                     db.add(ModelPerformanceLog(
                         model_id=specialist.id,
                         model_name=specialist.name,
@@ -452,6 +504,11 @@ async def _stream_single(
                     db.commit()
                 except Exception:
                     db.rollback()
+                # تسجيل gateway
+                if bundle:
+                    _log_gateway(db, bundle, api_key,
+                                 [specialist.specialization], response_ms,
+                                 "success", client_ip)
                 return
 
             elif chunk["type"] == "error":
@@ -460,5 +517,22 @@ async def _stream_single(
                 return
 
     except Exception as e:
+        response_ms = int((time.perf_counter() - start_total) * 1000)
+        try:
+            db.add(ModelPerformanceLog(
+                model_id=specialist.id,
+                model_name=specialist.name,
+                user_input=payload.message[:500],
+                model_output=f"STREAM_ERROR: {str(e)[:200]}",
+                response_ms=response_ms,
+                status="failed",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        if bundle:
+            _log_gateway(db, bundle, api_key,
+                         [specialist.specialization], response_ms,
+                         "failed", client_ip)
         yield _sse({"type": "error", "code": "STREAM_ERROR", "message": str(e)[:200]})
         yield "data: [DONE]\n\n"

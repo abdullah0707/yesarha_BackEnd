@@ -109,6 +109,7 @@ def ask_question(
         model=specialist.base_model or runtime_cfg.get_core_model(),
         messages=messages,
         options=_SPEED_OPTIONS,
+        think=False,
     )
     response_ms = int((time.perf_counter() - start) * 1000)
 
@@ -134,6 +135,7 @@ async def _stream_answer(messages, payload: AskRequest, specialist: SpecialistMo
         model=specialist.base_model or runtime_cfg.get_core_model(),
         messages=messages,
         options=_SPEED_OPTIONS,
+        think=False,
     ):
         if chunk["type"] == "token":
             full_response += chunk["content"]

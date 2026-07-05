@@ -7,7 +7,7 @@ import requests
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
-from app.core.security import require_admin
+from app.core.deps import require_admin
 from app.db.session import engine
 
 router = APIRouter(prefix="/admin/connections", tags=["Connections Health"])

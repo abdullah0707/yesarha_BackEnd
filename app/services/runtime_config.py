@@ -14,10 +14,15 @@ RuntimeConfigService — مصدر الإعدادات الديناميكية لل
   from app.services.runtime_config import runtime_cfg
   url = runtime_cfg.get("OLLAMA_BASE_URL")
 """
+import logging
 import threading
 from typing import Optional
 
+import httpx
+
 from app.core.config import settings
+
+_log = logging.getLogger("yesarha.runtime")
 
 
 # ── التعريفات الافتراضية لكل الإعدادات الديناميكية ──────────────
@@ -151,6 +156,73 @@ class RuntimeConfigService:
             all_settings = db.query(RuntimeSetting).all()
             self._cache = {s.key: s.value for s in all_settings if s.value is not None}
             self._initialized = True
+
+        # تحقق من CORE_MODEL وصعّد تلقائياً لأفضل موديل متاح
+        self._verify_core_model(db)
+
+    # ── Model priority (best first) ────────────────────────────────────────────
+    _MODEL_PRIORITY = ["qwen3:8b", "qwen3:4b", "mistral:7b", "llama3.1:8b", "llama3:8b", "gemma2:9b"]
+
+    def _verify_core_model(self, db=None) -> None:
+        """
+        عند البدء: يختار أفضل موديل متاح في Ollama.
+        - إذا الموديل الأمثل موجود في Ollama → يُحدّث DB والكاش تلقائياً
+        - إذا الموديل المضبوط غير موجود → يستخدم أفضل بديل متاح
+        يُشغَّل في كل restart → يصعّد تلقائياً لـ qwen3:8b حين يكتمل تحميله
+        """
+        configured = self._cache.get("CORE_MODEL", "")
+        try:
+            ollama_url = (self._cache.get("OLLAMA_BASE_URL") or settings.OLLAMA_BASE_URL).rstrip("/")
+            r = httpx.get(f"{ollama_url}/api/tags", timeout=5)
+            if not r.is_success:
+                return
+            available = [m.get("name", "") for m in r.json().get("models", [])]
+            if not available:
+                return
+
+            # أفضل موديل متاح بحسب قائمة الأولوية
+            best = next((p for p in self._MODEL_PRIORITY if p in available), available[0])
+
+            conf_rank = next((i for i, p in enumerate(self._MODEL_PRIORITY) if p == configured), 999)
+            best_rank = next((i for i, p in enumerate(self._MODEL_PRIORITY) if p == best),     999)
+
+            if configured == best:
+                _log.info(f"✅ CORE_MODEL '{configured}' — optimal, confirmed in Ollama")
+                return
+
+            if configured not in available:
+                reason = f"'{configured}' not in Ollama"
+            elif best_rank < conf_rank:
+                reason = f"'{best}' is higher priority than '{configured}'"
+            else:
+                _log.info(f"✅ CORE_MODEL '{configured}' confirmed in Ollama")
+                return
+
+            _log.warning(f"🔄 CORE_MODEL auto-select: {reason} → switching to '{best}'")
+            self._cache["CORE_MODEL"] = best
+
+            if db:
+                self._persist_core_model(db, best)
+        except Exception as e:
+            _log.debug(f"Model verification skipped: {e}")
+
+    def _persist_core_model(self, db, model_name: str) -> None:
+        """يحفظ CORE_MODEL الجديد في DB ويضبط الـ AIModel default."""
+        try:
+            from app.models.runtime import RuntimeSetting
+            from app.models.ai import AIModel
+
+            s = db.query(RuntimeSetting).filter(RuntimeSetting.key == "CORE_MODEL").first()
+            if s:
+                s.value = model_name
+            db.commit()
+
+            for m in db.query(AIModel).all():
+                m.is_default = (m.name == model_name)
+            db.commit()
+            _log.info(f"✅ Persisted CORE_MODEL='{model_name}' to DB")
+        except Exception as e:
+            _log.warning(f"Could not persist CORE_MODEL: {e}")
 
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """قراءة سريعة من الكاش — بدون DB hit"""

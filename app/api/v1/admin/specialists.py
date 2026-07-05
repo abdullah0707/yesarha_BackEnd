@@ -128,6 +128,104 @@ def list_specializations(_admin=Depends(get_current_admin)):
     ])
 
 
+# ── Resource Check ───────────────────────────────────────────────
+
+class ResourceCheckRequest(BaseModel):
+    specialization: str
+
+
+def _vram_free_gb() -> Optional[float]:
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if r.returncode == 0:
+            return round(float(r.stdout.strip().split("\n")[0].strip()) / 1024, 2)
+    except Exception:
+        pass
+    return None
+
+
+@router.post("/resource-check")
+def resource_check(
+    payload: ResourceCheckRequest,
+    _admin=Depends(get_current_admin),
+):
+    """
+    يتحقق من توافر موارد الجهاز قبل إنشاء نموذج متخصص.
+    يُرجع: can_run, recommended_model, vram_available, أو بدائل أخف.
+    """
+    if payload.specialization not in VALID_SPECIALIZATIONS:
+        raise AppError(ErrorCodes.VALIDATION_ERROR,
+                       f"التخصص غير معتمد: {payload.specialization}", 400)
+
+    spec_info  = SPECIALIZATIONS[payload.specialization]
+    vram_req   = spec_info["vram_gb"]
+    vram_fall  = spec_info["vram_fallback_gb"]
+    base_model = spec_info["base_model"]
+    fall_model = spec_info["fallback_model"]
+
+    available = _vram_free_gb()
+
+    # لا يوجد GPU أو لا يمكن قراءة VRAM — نفترض كفاءة (سيفشل Pull لاحقاً إن لم يكن)
+    if available is None:
+        return success({
+            "can_run": True,
+            "gpu_detected": False,
+            "recommended_model": base_model,
+            "vram_required_gb": vram_req,
+            "vram_available_gb": None,
+            "note": "لم يُكتشف GPU — يُفترض بيئة سحابية أو CPU. سيُنفَّذ الإنشاء وقد يأخذ وقتاً أطول.",
+        })
+
+    if available >= vram_req:
+        return success({
+            "can_run": True,
+            "gpu_detected": True,
+            "using_fallback": False,
+            "recommended_model": base_model,
+            "vram_required_gb": vram_req,
+            "vram_available_gb": available,
+        })
+
+    if available >= vram_fall:
+        return success({
+            "can_run": True,
+            "gpu_detected": True,
+            "using_fallback": True,
+            "recommended_model": fall_model,
+            "original_model": base_model,
+            "reason": f"VRAM ({available} GB) أقل من المطلوب للنموذج الكامل ({vram_req} GB) — سيُستخدم {fall_model} ({vram_fall} GB)",
+            "vram_required_gb": vram_req,
+            "vram_fallback_gb": vram_fall,
+            "vram_available_gb": available,
+        })
+
+    # لا يكفي حتى الـ fallback — اقترح تخصصات أخف
+    alternatives = [
+        {
+            "specialization": k,
+            "model": v["fallback_model"],
+            "vram_gb": v["vram_fallback_gb"],
+            "label_ar": v["label_ar"],
+        }
+        for k, v in SPECIALIZATIONS.items()
+        if v["vram_fallback_gb"] <= available and k != payload.specialization
+    ]
+    return success({
+        "can_run": False,
+        "gpu_detected": True,
+        "reason": f"الجهاز يحتاج {vram_fall} GB VRAM على الأقل، لكن المتاح {available} GB فقط",
+        "vram_required_gb": vram_req,
+        "vram_fallback_gb": vram_fall,
+        "vram_available_gb": available,
+        "alternatives": alternatives,
+        "suggestion": "أوقف بعض النماذج الجارية لتحرير VRAM، أو اختر تخصصاً من البدائل المقترحة",
+    })
+
+
 # ── List ──────────────────────────────────────────────────────────
 
 @router.get("")

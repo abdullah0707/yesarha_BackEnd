@@ -3,11 +3,36 @@ Ollama Client مع دعم Streaming كامل
 """
 import json
 import time
-from typing import Generator, Optional, AsyncGenerator
+from typing import Generator, Optional
 import requests
 
 from app.core.config import settings
 from app.core.responses import AppError, ErrorCodes
+
+
+def _strip_think_block(text: str, in_think: bool) -> tuple[str, bool]:
+    """
+    يُزيل كتل <think>...</think> من نص مُتدفِّق.
+    طبقة أمان إضافية في حال لم يحترم الموديل think=False.
+    Returns: (filtered_text, new_in_think_state)
+    """
+    out: list[str] = []
+    while text:
+        if not in_think:
+            i = text.find("<think>")
+            if i == -1:
+                out.append(text)
+                break
+            out.append(text[:i])
+            text = text[i + 7:]
+            in_think = True
+        else:
+            i = text.find("</think>")
+            if i == -1:
+                break  # لا يزال داخل كتلة التفكير — تجاهل كل شيء
+            text = text[i + 8:]
+            in_think = False
+    return "".join(out), in_think
 
 
 def _resolve_ollama_url(base_url: Optional[str]) -> str:
@@ -30,13 +55,16 @@ class OllamaClient:
     def chat(self, model: str, messages: list[dict],
              stream: bool = False, options: Optional[dict] = None,
              tools: Optional[list[dict]] = None,
-             timeout: int = None) -> dict:
+             timeout: int = None,
+             think: Optional[bool] = None) -> dict:
         url = f"{self.base_url}/api/chat"
         payload = {"model": model, "messages": messages, "stream": False}
         if options:
             payload["options"] = options
         if tools:
             payload["tools"] = tools
+        if think is not None:
+            payload["think"] = think
 
         start = time.perf_counter()
         try:
@@ -73,7 +101,8 @@ class OllamaClient:
     def chat_stream(self, model: str, messages: list[dict],
                     options: Optional[dict] = None,
                     tools: Optional[list[dict]] = None,
-                    timeout: int = None) -> Generator[dict, None, None]:
+                    timeout: int = None,
+                    think: Optional[bool] = None) -> Generator[dict, None, None]:
         """
         يُرجع generator يُنتج chunks:
         {"type": "token", "content": "..."}
@@ -90,6 +119,8 @@ class OllamaClient:
             payload["options"] = options
         if tools:
             payload["tools"] = tools
+        if think is not None:
+            payload["think"] = think
 
         start = time.perf_counter()
 
@@ -110,6 +141,7 @@ class OllamaClient:
 
                 tokens_input = 0
                 tokens_output = 0
+                _in_think = False  # حالة فلتر <think> عبر الـ chunks
 
                 for line in resp.iter_lines():
                     if not line:
@@ -133,7 +165,10 @@ class OllamaClient:
 
                     content = (data.get("message") or {}).get("content", "")
                     if content:
-                        yield {"type": "token", "content": content}
+                        # فلترة <think>...</think> — تعمل دائماً كطبقة أمان
+                        content, _in_think = _strip_think_block(content, _in_think)
+                        if content:
+                            yield {"type": "token", "content": content}
 
         except requests.exceptions.ConnectionError:
             yield {"type": "error", "code": ErrorCodes.OLLAMA_UNREACHABLE,

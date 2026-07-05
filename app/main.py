@@ -31,6 +31,11 @@ from app.api.v1.admin.monitor import router as monitor_router
 from app.api.v1.admin.bundles import router as bundles_router
 from app.api.v1.admin.runtime_config import router as runtime_config_router
 from app.api.v1.admin.connections import router as connections_router
+from app.api.v1.admin.core_advisor import router as core_advisor_router
+from app.api.v1.admin.tech_manager import router as tech_manager_router
+from app.api.v1.admin.registry import router as registry_router
+from app.api.v1.admin.gateway import router as gateway_router
+from app.api.v1.admin.training import router as training_router
 
 # Core Intelligence
 from app.api.v1.core.chat import router as core_chat_router
@@ -45,10 +50,46 @@ from app.api.v1.specialist.bundle_chat import router as bundle_chat_router
 from app.api.v1.specialist.orchestrate import router as orchestrate_router
 
 
+_WEAK_JWT   = "CHANGE_ME_SUPER_SECRET_KEY"
+_WEAK_IKEY  = "CHANGE_ME_INTERNAL_KEY"
+
+
+def _security_gate():
+    """
+    Refuse to start in production with insecure default secrets.
+    In development, print warnings only.
+    """
+    import logging
+    log = logging.getLogger("security")
+    is_prod = settings.ENV.lower() == "production"
+    problems = []
+
+    if settings.JWT_SECRET_KEY == _WEAK_JWT:
+        problems.append("JWT_SECRET_KEY is the default placeholder — set a strong secret in .env")
+    if settings.INTERNAL_API_KEY == _WEAK_IKEY:
+        problems.append("INTERNAL_API_KEY is the default placeholder — set a strong key in .env")
+    if settings.CORS_ORIGINS == ["*"] and is_prod:
+        problems.append("CORS_ORIGINS is wildcard (*) — restrict to your domain in production")
+
+    if not problems:
+        return
+
+    for p in problems:
+        log.warning(f"[SECURITY] {p}")
+
+    if is_prod:
+        raise RuntimeError(
+            "Production startup blocked — insecure defaults detected:\n"
+            + "\n".join(f"  • {p}" for p in problems)
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """يُشغَّل عند بدء التطبيق وعند إيقافه"""
     # ── Startup ──
+    _security_gate()
+
     from app.core.intelligence.auto_monitor import core_monitor
     from app.services.scheduler import start_scheduler, stop_scheduler
     from app.services.runtime_config import runtime_cfg
@@ -62,6 +103,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         import logging
         logging.getLogger("runtime_config").warning(f"Runtime config init failed: {e}")
+
+    # مزامنة ai_models مع ما هو فعلاً في Ollama
+    try:
+        from app.api.v1.admin.registry import sync_ollama_to_db
+        _sync_db = SessionLocal()
+        sync_result = sync_ollama_to_db(_sync_db)
+        _sync_db.close()
+        import logging
+        logging.getLogger("yesarha.registry").info(f"Startup sync: {sync_result}")
+    except Exception as _sync_err:
+        import logging
+        logging.getLogger("yesarha.registry").warning(f"Startup registry sync failed: {_sync_err}")
 
     core_monitor.start()
     start_scheduler()
@@ -124,6 +177,11 @@ def create_app() -> FastAPI:
     app.include_router(bundles_router,           prefix=p)
     app.include_router(runtime_config_router,    prefix=p)
     app.include_router(connections_router,       prefix=p)
+    app.include_router(core_advisor_router,      prefix=p)
+    app.include_router(tech_manager_router,      prefix=p)
+    app.include_router(registry_router,          prefix=p)
+    app.include_router(gateway_router,           prefix=p)
+    app.include_router(training_router,          prefix=p)
     app.include_router(core_chat_router,         prefix=p)
     app.include_router(education_router,         prefix=p)
     app.include_router(public_specialist_router, prefix=p)

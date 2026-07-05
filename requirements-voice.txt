@@ -1,18 +1,65 @@
 # Voice Specialist dependencies — تُثبَّت فقط لو VOICE_INSTALL=true
-# الحجم الكلي ~4-6 GB (torch + whisper + TTS)
+# الحجم الكلي ~4-5 GB (torch + torchaudio + whisper + TTS + XTTS-v2 model)
 #
-# تثبيت داخل Container الشغّال (للتجربة السريعة):
-#   docker exec yesarha_backend pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-#   docker exec yesarha_backend pip install openai-whisper TTS
+# لتثبيت يدوي سريع داخل Container:
+#   docker exec yesarha_backend pip install torch==2.11.0+cu130 torchaudio==2.11.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130
+#   docker exec yesarha_backend pip install soundfile openai-whisper transformers==4.41.2 TTS
+#   docker exec yesarha_backend pip install noisereduce librosa
 #
 # أو عبر Docker build (دائم):
-#   docker compose build --build-arg VOICE_INSTALL=true backend
+#   docker compose build --build-arg VOICE_INSTALL=true --build-arg VOICE_CACHE_BUST=$(date +%s) backend
 
-# PyTorch — CUDA 12.1 (RTX 4060)
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.3.1+cu121
-torchaudio==2.3.1+cu121
+# 1. setuptools مطلوب لبناء بعض الحزم في python:3.11-slim
+setuptools
 
-# Whisper + TTS
-openai-whisper==20231117
-TTS==0.22.0
+# 2. PyTorch wheel index — للحصول على إصدارات cu130 المتطابقة
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# 3. torch + torchaudio — يجب أن يتطابقا في الإصدار
+#    ملاحظة: 2.12.1+cu130 غير موجود — أقصى نسخة متاحة هي 2.11.0+cu130
+torch==2.11.0+cu130
+torchaudio==2.11.0+cu130
+
+# 4. soundfile — بديل audio backend لـ torchaudio 2.9+ (تجنّب TorchCodec)
+soundfile
+
+# 5. Whisper STT
+openai-whisper
+
+# 6. Coqui TTS — يشمل XTTS-v2 متعدد اللغات
+#    transformers 5.x حذفت BeamSearchScorer المطلوبة من TTS — نثبّت نسخة متوافقة أولاً
+transformers==4.41.2
+TTS
+
+# 7. Audio Enhancement (Layer 2) + Speed Control (Layer 4)
+noisereduce   # إزالة الضوضاء من عينة الصوت المرجعية
+librosa       # resample + time_stretch للتحكم في السرعة
+
+# 8. Arabic Diacritization (Layer 3 — Mishkal)
+mishkal       # تشكيل النص الفصيح تلقائياً — يُحسّن نطق Edge-TTS وXTTS-v2 للعربية الفصحى
+
+# 9. TorchCodec — مطلوب من torchaudio 2.9+ كـ audio backend للـ inference
+#    يُثبَّت بعد torch لأنه يعتمد على نفس إصدار CUDA
+torchcodec
+
+# 10. Habibi-TTS runtime deps (بدون torch/torchaudio لتجنب downgrade)
+#     habibi-tts و f5-tts تُثبَّت منفصلاً في Dockerfile بـ --no-deps
+#     لأن pip -r لا يدعم --no-deps inline لحزمة واحدة
+accelerate
+bitsandbytes
+cached_path
+click
+ema_pytorch
+hydra-core
+pydub
+pypinyin
+rjieba
+safetensors
+tomli
+torchdiffeq
+transformers_stream_generator
+unidecode
+vocos
+wandb
+x_transformers
+datasets

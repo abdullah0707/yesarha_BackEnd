@@ -168,3 +168,39 @@ class TrainingSession(Base):
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GatewayRequestLog(Base):
+    """سجل كل طلب مرّ عبر API Gateway — bundle keys + specialist keys"""
+    __tablename__ = "gateway_request_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key_prefix = Column(String(24), nullable=False, index=True)  # أول 24 حرف من المفتاح
+    key_type = Column(String, default="bundle")                  # "bundle" | "specialist"
+    bundle_id = Column(Integer, ForeignKey("specialist_bundles.id"), nullable=True, index=True)
+    specialist_id = Column(Integer, ForeignKey("specialist_models.id"), nullable=True)
+
+    endpoint = Column(String, nullable=True)          # "/specialist/bundle/ask"
+    specialists_used = Column(JSON, default=list)     # ["education", "code"]
+    response_ms = Column(Integer, default=0)
+    status = Column(String, default="success")        # "success" | "failed" | "rejected"
+    ip_address = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class GatewayKeyConfig(Base):
+    """إعدادات متقدمة لمفتاح Bundle — حدود + انتهاء صلاحية"""
+    __tablename__ = "gateway_key_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bundle_id = Column(Integer, ForeignKey("specialist_bundles.id"),
+                       nullable=False, unique=True, index=True)
+
+    daily_limit = Column(Integer, nullable=True)    # None = غير محدود
+    monthly_limit = Column(Integer, nullable=True)  # None = غير محدود
+    expires_at = Column(DateTime, nullable=True)    # None = لا ينتهي
+    notes = Column(Text, nullable=True)             # ملاحظات للأدمن
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

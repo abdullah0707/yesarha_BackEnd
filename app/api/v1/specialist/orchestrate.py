@@ -56,9 +56,9 @@ def _get_orchestrate_auth(
 
     # ── Admin JWT
     if authorization and authorization.startswith("Bearer "):
-        from app.core.security import decode_access_token
+        from app.core.security import decode_token
         token = authorization.split(" ", 1)[1]
-        payload = decode_access_token(token)
+        payload = decode_token(token)
         if not payload:
             raise AppError(ErrorCodes.UNAUTHORIZED, "التوكن غير صالح", 401)
         return {"type": "admin", "admin_id": payload.get("sub")}

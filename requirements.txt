@@ -37,3 +37,6 @@ sse-starlette
 
 # Rate limiting
 slowapi
+
+# Voice noise reduction
+noisereduce

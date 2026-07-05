@@ -15,7 +15,7 @@ from app.core.config import settings
 class ModelManager:
     """
     يدير دورة حياة النماذج في Ollama:
-    - Core (qwen3:8b) محمّل دائماً ما أمكن
+    - Core دائماً له الأولوية في VRAM
     - النماذج المتخصصة تُحمَّل عند الطلب وتُفرَّغ بعد خمول
     """
 
@@ -23,7 +23,15 @@ class ModelManager:
         self.ollama_url = settings.OLLAMA_BASE_URL
         self._loaded_models: dict[str, datetime] = {}  # model_name → last_used
         self._loading: set[str] = set()                 # نماذج قيد التحميل
-        self._core_model = settings.CORE_MODEL
+
+    @property
+    def _core_model(self) -> str:
+        """يقرأ CORE_MODEL من runtime_cfg دائماً — يعكس آخر قيمة محدّثة."""
+        try:
+            from app.services.runtime_config import runtime_cfg
+            return runtime_cfg.get_core_model()
+        except Exception:
+            return settings.CORE_MODEL
 
     # ── Ollama API helpers ────────────────────────────────────────
 
@@ -155,15 +163,21 @@ class ModelManager:
 
     def get_status(self) -> dict:
         """حالة كاملة لـ Model Manager"""
+        try:
+            from app.services.runtime_config import runtime_cfg
+            vram_total = runtime_cfg.get_vram_gb()
+        except Exception:
+            vram_total = settings.VRAM_TOTAL_GB
+        core = self._core_model
         loaded = self.get_loaded_models()
         vram_used = self.get_vram_usage_gb()
         return {
             "loaded_models": loaded,
-            "core_model": self._core_model,
-            "core_loaded": self._core_model in loaded,
+            "core_model": core,
+            "core_loaded": core in loaded,
             "vram_used_gb": round(vram_used, 2),
-            "vram_total_gb": settings.VRAM_TOTAL_GB,
-            "vram_free_gb": round(settings.VRAM_TOTAL_GB - vram_used, 2),
+            "vram_total_gb": vram_total,
+            "vram_free_gb": round(vram_total - vram_used, 2),
         }
 
 

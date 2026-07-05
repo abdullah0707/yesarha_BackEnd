@@ -92,11 +92,16 @@ services:
       CORS_ORIGINS: '["*"]'
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       XTTS_MODEL_PATH: /app/data/xtts
+      COQUI_TOS_AGREED: "1"
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     ports:
       - "8000:8000"
     volumes:
+      - ./app:/app/app
       - ./data:/app/data
       - voice_models:/app/data/xtts
+      - tts_cache:/root/.local/share/tts
+      - hf_cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -111,3 +116,5 @@ volumes:
   ollama_data:
   redis_data:
   voice_models:
+  tts_cache:
+  hf_cache:

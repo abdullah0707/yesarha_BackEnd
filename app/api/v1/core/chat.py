@@ -19,6 +19,7 @@ from app.db.session import get_db
 from app.core.deps import get_current_admin
 from app.core.responses import success, AppError, ErrorCodes
 from app.core.config import settings
+from app.services.runtime_config import runtime_cfg
 from app.models.user import Admin
 from app.models.operations import Execution
 from app.services.ollama_client import OllamaClient
@@ -58,6 +59,56 @@ def _resolve_tool_context(tool_results: list[dict]) -> str:
         f"### {tr['tool']}:\n{json.dumps(tr['result'], ensure_ascii=False, indent=2)}"
         for tr in tool_results
     )
+
+
+_VALID_TOOL_NAMES = {t["function"]["name"] for t in CORE_TOOLS}
+
+
+def _extract_tool_calls_from_text(content: str) -> list[dict]:
+    """
+    Fallback for models that don't support structured tool_calls (e.g. mistral:7b).
+    Parses JSON arrays from code blocks or bare JSON in text content.
+    Only accepts names that match known CORE_TOOLS to prevent hallucination.
+    """
+    import re
+    blocks: list[str] = []
+    # Extract from ```[lang] ... ``` code blocks
+    for block in re.findall(r"```(?:javascript|json|tool_call)?\s*\n([\s\S]*?)```", content):
+        blocks.append(block.strip())
+    # Also try raw JSON array (no code fence)
+    stripped = content.strip()
+    if stripped.startswith("["):
+        blocks.append(stripped)
+
+    for block in blocks:
+        if not block.startswith("["):
+            continue
+        try:
+            parsed = json.loads(block)
+            if not isinstance(parsed, list) or not parsed:
+                continue
+            result = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name") or item.get("function", {}).get("name", "")
+                # Reject names that aren't real tools (prevent hallucinated model names)
+                if name not in _VALID_TOOL_NAMES:
+                    continue
+                args = item.get("arguments") or item.get("parameters") or item.get("args") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                result.append({"function": {"name": name, "arguments": args}})
+            if result:
+                return result
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return []
 
 
 # ── Core Chat ───────────────────────────────────────────────────
@@ -100,11 +151,15 @@ async def _resolve_tools_phase(payload: CoreChatRequest, executor: ToolExecutor)
 
     for _ in range(MAX_TOOL_ITERATIONS):
         result = await sync_gen_to_async_single(
-            client.chat, model=settings.CORE_MODEL,
-            messages=messages, tools=CORE_TOOLS
+            client.chat, model=runtime_cfg.get_core_model(),
+            messages=messages, tools=CORE_TOOLS,
+            options={"temperature": 0}  # deterministic tool detection
         )
 
         calls = result.get("tool_calls") or []
+        # Fallback: some models (e.g. mistral:7b) return JSON as text instead of structured tool_calls
+        if not calls and result.get("content"):
+            calls = _extract_tool_calls_from_text(result["content"])
         if not calls:
             return tool_results, tool_context
 
@@ -122,7 +177,9 @@ async def _resolve_tools_phase(payload: CoreChatRequest, executor: ToolExecutor)
             tool_results.append({"tool": name, "result": tool_result})
 
         tool_context = _resolve_tool_context(tool_results)
-        messages = build_messages(payload.message, payload.history, tool_context)
+        # Break after first successful tool round — prevents repeat-calls at temperature=0.
+        # Multi-tool chains within a single round (multiple calls in one iteration) still work.
+        break
 
     return tool_results, tool_context
 
@@ -166,7 +223,7 @@ async def _stream_core_response(payload: CoreChatRequest, db: Session, admin: Ad
 
     async for chunk in sync_gen_to_async(
         client.chat_stream,
-        model=settings.CORE_MODEL,
+        model=runtime_cfg.get_core_model(),
         messages=final_messages,
     ):
         if chunk["type"] == "token":
@@ -203,7 +260,7 @@ async def _run_core_chat(payload: CoreChatRequest, db: Session, admin: Admin) ->
     tool_results, tool_context = await _resolve_tools_phase(payload, executor)
 
     final_messages = build_messages(payload.message, payload.history, tool_context or None)
-    result = client.chat(model=settings.CORE_MODEL, messages=final_messages)
+    result = client.chat(model=runtime_cfg.get_core_model(), messages=final_messages)
 
     return {
         "content": result["content"],
@@ -246,7 +303,7 @@ async def specialist_chat(
         messages.extend(payload.history)
     messages.append({"role": "user", "content": payload.message})
 
-    result = client.chat(model=specialist.base_model or settings.CORE_MODEL, messages=messages)
+    result = client.chat(model=specialist.base_model or runtime_cfg.get_core_model(), messages=messages)
     specialist.total_requests = (specialist.total_requests or 0) + 1
     db.commit()
 
@@ -272,7 +329,7 @@ async def _stream_specialist(payload, specialist, db: Session, admin: Admin):
 
     async for chunk in sync_gen_to_async(
         client.chat_stream,
-        model=specialist.base_model or settings.CORE_MODEL,
+        model=specialist.base_model or runtime_cfg.get_core_model(),
         messages=messages
     ):
         if chunk["type"] == "token":

@@ -13,6 +13,9 @@ search:
   autocomplete: ""
   default_lang: "auto"
   max_page: 5
+  formats:
+    - html
+    - json
 
 server:
   port: 8080

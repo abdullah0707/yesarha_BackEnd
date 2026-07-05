@@ -18,11 +18,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # ── Voice requirements (ثقيلة — layer منفصل + cache) ──
 # VOICE_INSTALL=true لتفعيل التثبيت عند الـ build
+# VOICE_CACHE_BUST=<timestamp> لكسر cache الـ Docker layer عند الحاجة
 ARG VOICE_INSTALL=false
+ARG VOICE_CACHE_BUST=1
 COPY requirements-voice.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
+    echo "VOICE_INSTALL=$VOICE_INSTALL | BUST=$VOICE_CACHE_BUST" && \
     if [ "$VOICE_INSTALL" = "true" ]; then \
-      pip install -r requirements-voice.txt; \
+      pip install -r requirements-voice.txt && \
+      pip install habibi-tts --no-deps && \
+      pip install f5-tts --no-deps; \
     fi
 
 COPY app ./app

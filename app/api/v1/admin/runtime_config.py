@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.session import get_db
-from app.core.security import require_admin
+from app.core.deps import require_admin
 from app.services.runtime_config import runtime_cfg, SETTING_DEFINITIONS
 
 router = APIRouter(prefix="/admin/runtime-config", tags=["Runtime Config"])

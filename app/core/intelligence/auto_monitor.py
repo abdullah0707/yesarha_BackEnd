@@ -72,7 +72,9 @@ class CoreAutoMonitor:
         loop = asyncio.get_running_loop()
 
         # شغّل كل العمليات في thread منفصل لتجنب حجب event loop
-        await loop.run_in_executor(None, self._check_all_models)
+        await loop.run_in_executor(None, self._run_quality_scoring)   # أولاً: تقييم الردود
+        await loop.run_in_executor(None, self._check_all_models)      # ثانياً: تقييم بناءً على الجودة
+        await loop.run_in_executor(None, self._measure_after_scores)  # ثالثاً: قياس تحسّن التدريب
         await loop.run_in_executor(None, self._check_weekly_retrain)
         await loop.run_in_executor(None, self._cleanup_old_tasks)
 
@@ -95,45 +97,51 @@ class CoreAutoMonitor:
             db.close()
 
     def _evaluate_model(self, model: SpecialistModel, db: Session):
-        """يُقيِّم نموذجاً واحداً ويتصرف"""
-        # آخر 100 طلب
+        """يُقيِّم نموذجاً واحداً — يعتمد على quality_score إن توفّر"""
         logs = db.query(ModelPerformanceLog).filter(
             ModelPerformanceLog.model_id == model.id
         ).order_by(ModelPerformanceLog.created_at.desc()).limit(100).all()
 
         if len(logs) < MIN_REQUESTS_FOR_EVAL:
-            return  # بيانات غير كافية
+            return
 
-        success_count = sum(1 for l in logs if l.status == "success")
-        success_rate = success_count / len(logs)
+        success_count = sum(1 for lg in logs if lg.status == "success")
+        success_rate  = success_count / len(logs)
 
-        # جمع المشاكل الشائعة
-        all_issues = []
-        for log in logs:
-            if log.issues_detected:
-                all_issues.extend(log.issues_detected)
+        # جمع المشاكل من logs التي قُيِّمت
+        all_issues: list[str] = []
+        scored_logs = [lg for lg in logs if lg.quality_score is not None]
+        for lg in scored_logs:
+            if lg.issues_detected:
+                all_issues.extend(lg.issues_detected)
 
-        # تحديث success_rate في الداتابيز
+        # متوسط جودة الردود إن توفّر (أولوية على success_rate)
+        avg_quality: float | None = None
+        if len(scored_logs) >= MIN_REQUESTS_FOR_EVAL:
+            avg_quality = sum(lg.quality_score for lg in scored_logs) / len(scored_logs)
+
+        # استخدم avg_quality إن توفّر، وإلا success_rate
+        perf_score  = avg_quality if avg_quality is not None else success_rate
+        perf_label  = f"quality={perf_score:.2f}" if avg_quality is not None else f"success={success_rate:.1%}"
+
         model.success_rate = success_rate
         db.commit()
 
-        if success_rate < POOR_PERFORMANCE_THRESHOLD:
-            logger.warning(
-                f"⚠️ {model.name}: poor performance {success_rate:.1%} "
-                f"— triggering auto-fix"
-            )
-            self._auto_fix_model(model, all_issues, success_rate, db)
+        if perf_score < POOR_PERFORMANCE_THRESHOLD:
+            logger.warning(f"⚠️ {model.name}: poor {perf_label} — triggering auto-fix")
+            self._auto_fix_model(model, all_issues, perf_score, db)
 
-        elif success_rate < WEAK_PERFORMANCE_THRESHOLD:
-            logger.info(f"📊 {model.name}: weak performance {success_rate:.1%} — logged")
+        elif perf_score < WEAK_PERFORMANCE_THRESHOLD:
+            logger.info(f"📊 {model.name}: weak {perf_label} — logged")
             self._log_task(db, "performance_eval", model.id, {
-                "success_rate": success_rate,
+                "perf_score": round(perf_score, 3),
+                "avg_quality": round(avg_quality, 3) if avg_quality else None,
+                "success_rate": round(success_rate, 3),
                 "issues": list(set(all_issues))[:5],
                 "action": "monitoring",
             })
-
         else:
-            logger.info(f"✅ {model.name}: healthy {success_rate:.1%}")
+            logger.info(f"✅ {model.name}: healthy {perf_label}")
 
     # ── Auto Fix ──────────────────────────────────────────────────────────────
 
@@ -200,7 +208,7 @@ class CoreAutoMonitor:
                 session_type="prompt",
                 data_sources=[r.get("url", "") for r in knowledge if r.get("url")],
                 status="completed",
-                before_score=success_rate,
+                before_score=round(perf_score, 3),
                 started_at=datetime.utcnow(),
                 completed_at=datetime.utcnow(),
             )
@@ -309,6 +317,68 @@ class CoreAutoMonitor:
             db.commit()
         except Exception as e:
             logger.error(f"Log task error: {e}")
+
+    # ── Quality Scoring ───────────────────────────────────────────────────────
+
+    def _run_quality_scoring(self):
+        """يُشغِّل Quality Scorer على logs غير مُقيَّمة"""
+        from app.services.training.quality_scorer import score_pending_logs
+        db = SessionLocal()
+        try:
+            scored = score_pending_logs(db, limit=30)
+            if scored:
+                logger.info(f"🎯 Quality scoring: scored {scored} new logs")
+        except Exception as e:
+            logger.error(f"Quality scoring cycle error: {e}")
+        finally:
+            db.close()
+
+    # ── After-Score Measurement ────────────────────────────────────────────────
+
+    def _measure_after_scores(self):
+        """
+        يقيس improvement_percent لجلسات التدريب التي اكتملت.
+        يعتمد على quality_score للطلبات التي جاءت بعد التدريب.
+        """
+        db = SessionLocal()
+        try:
+            two_days_ago = datetime.utcnow() - timedelta(days=2)
+
+            # جلسات اكتملت منذ أكثر من يومين ولم تُقاس بعد
+            pending_sessions = db.query(TrainingSession).filter(
+                TrainingSession.after_score.is_(None),
+                TrainingSession.status == "completed",
+                TrainingSession.completed_at.isnot(None),
+                TrainingSession.completed_at < two_days_ago,
+            ).all()
+
+            for session in pending_sessions:
+                post_logs = db.query(ModelPerformanceLog).filter(
+                    ModelPerformanceLog.model_id == session.model_id,
+                    ModelPerformanceLog.created_at > session.completed_at,
+                    ModelPerformanceLog.quality_score.isnot(None),
+                    ModelPerformanceLog.status == "success",
+                ).order_by(ModelPerformanceLog.created_at.asc()).limit(20).all()
+
+                if len(post_logs) < 5:
+                    continue  # بيانات غير كافية بعد
+
+                after = sum(lg.quality_score for lg in post_logs) / len(post_logs)
+                before = session.before_score or 0.0
+                improvement = ((after - before) / max(before, 0.01)) * 100
+
+                session.after_score        = round(after, 3)
+                session.improvement_percent = round(improvement, 1)
+                logger.info(
+                    f"📈 Training session #{session.id}: "
+                    f"before={before:.2f} after={after:.2f} Δ={improvement:+.1f}%"
+                )
+
+            db.commit()
+        except Exception as e:
+            logger.error(f"After-score measurement error: {e}")
+        finally:
+            db.close()
 
     def _cleanup_old_tasks(self):
         """يحذف CoreTasks الأقدم من 30 يوماً لتوفير مساحة"""

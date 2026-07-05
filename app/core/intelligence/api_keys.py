@@ -1,9 +1,9 @@
 """
-نظام API Key بسيط — مفتاح واحد لكل نموذج متخصص
-يُستخدم للسماح للمستخدمين النهائيين (عبر تطبيق أو موقع يسرها)
-باستدعاء نموذج متخصص مباشرة دون الحاجة لتوكن أدمن.
+نظام API Key — مفتاح لكل نموذج متخصص أو حزمة
+يتحقق من صلاحية المفتاح + تاريخ الانتهاء + الحد اليومي/الشهري.
 """
 import secrets
+from datetime import datetime, timedelta
 from fastapi import Depends, Header
 from sqlalchemy.orm import Session
 
@@ -56,12 +56,18 @@ def get_bundle_by_api_key(
     x_api_key: str = Header(default=None, alias="X-API-Key"),
     db: Session = Depends(get_db),
 ) -> SpecialistBundle:
-    """FastAPI dependency للـ Bundle API — يتحقق من مفتاح الحزمة"""
+    """
+    FastAPI dependency للـ Bundle API — يتحقق من:
+    1. صحة المفتاح وحالة الحزمة
+    2. تاريخ الانتهاء (expires_at)
+    3. الحد اليومي والشهري (daily_limit / monthly_limit)
+    """
     if not x_api_key:
         raise AppError(ErrorCodes.UNAUTHORIZED, "X-API-Key header مفقود", 401)
 
     if not x_api_key.startswith("yesk_bundle_"):
-        raise AppError(ErrorCodes.UNAUTHORIZED, "هذا المفتاح ليس مفتاح حزمة — استخدم /specialist/ask للمفاتيح المباشرة", 401)
+        raise AppError(ErrorCodes.UNAUTHORIZED,
+                       "هذا المفتاح ليس مفتاح حزمة — استخدم /specialist/ask للمفاتيح المباشرة", 401)
 
     bundle = db.query(SpecialistBundle).filter(
         SpecialistBundle.api_key == x_api_key
@@ -73,4 +79,59 @@ def get_bundle_by_api_key(
     if bundle.status != "active":
         raise AppError(ErrorCodes.FORBIDDEN, f"الحزمة '{bundle.name}' غير نشطة", 403)
 
+    _enforce_gateway_limits(bundle, db)
+
     return bundle
+
+
+def _enforce_gateway_limits(bundle: SpecialistBundle, db: Session) -> None:
+    """يتحقق من حدود المفتاح — يرفض الطلب إذا تجاوز الحد أو انتهت الصلاحية"""
+    from app.models.specialist import GatewayKeyConfig, GatewayRequestLog
+
+    config = db.query(GatewayKeyConfig).filter(
+        GatewayKeyConfig.bundle_id == bundle.id
+    ).first()
+
+    if not config:
+        return  # لا قيود مضبوطة
+
+    now = datetime.utcnow()
+
+    # فحص تاريخ الانتهاء
+    if config.expires_at and now > config.expires_at:
+        raise AppError(
+            ErrorCodes.FORBIDDEN,
+            f"مفتاح الحزمة '{bundle.name}' انتهت صلاحيته في "
+            f"{config.expires_at.strftime('%Y-%m-%d')}",
+            403,
+        )
+
+    # فحص الحد اليومي
+    if config.daily_limit:
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = db.query(GatewayRequestLog).filter(
+            GatewayRequestLog.bundle_id == bundle.id,
+            GatewayRequestLog.created_at >= today_start,
+            GatewayRequestLog.status != "rejected",
+        ).count()
+        if today_count >= config.daily_limit:
+            raise AppError(
+                ErrorCodes.DAILY_LIMIT_REACHED,
+                f"تجاوزت الحد اليومي ({config.daily_limit} طلب) للحزمة '{bundle.name}'",
+                429,
+            )
+
+    # فحص الحد الشهري
+    if config.monthly_limit:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_count = db.query(GatewayRequestLog).filter(
+            GatewayRequestLog.bundle_id == bundle.id,
+            GatewayRequestLog.created_at >= month_start,
+            GatewayRequestLog.status != "rejected",
+        ).count()
+        if month_count >= config.monthly_limit:
+            raise AppError(
+                ErrorCodes.MONTHLY_LIMIT_REACHED,
+                f"تجاوزت الحد الشهري ({config.monthly_limit} طلب) للحزمة '{bundle.name}'",
+                429,
+            )
