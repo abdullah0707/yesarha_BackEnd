@@ -2,7 +2,7 @@
 # الحجم الكلي ~4-5 GB (torch + torchaudio + whisper + TTS + XTTS-v2 model)
 #
 # لتثبيت يدوي سريع داخل Container:
-#   docker exec yesarha_backend pip install torch==2.11.0+cu130 torchaudio==2.11.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130
+#   docker exec yesarha_backend pip install torch==2.12.0+cu130 torchaudio==2.11.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130
 #   docker exec yesarha_backend pip install soundfile openai-whisper transformers==4.41.2 TTS
 #   docker exec yesarha_backend pip install noisereduce librosa
 #
@@ -17,7 +17,7 @@ setuptools
 
 # 3. torch + torchaudio — يجب أن يتطابقا في الإصدار
 #    ملاحظة: 2.12.1+cu130 غير موجود — أقصى نسخة متاحة هي 2.11.0+cu130
-torch==2.11.0+cu130
+torch==2.12.0+cu130
 torchaudio==2.11.0+cu130
 
 # 4. soundfile — بديل audio backend لـ torchaudio 2.9+ (تجنّب TorchCodec)
