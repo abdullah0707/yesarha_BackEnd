@@ -31,7 +31,10 @@ openai-whisper
 transformers==4.41.2
 TTS
 
-# 7. Audio Enhancement (Layer 2) + Speed Control (Layer 4)
+# 7. Edge-TTS — Microsoft Neural TTS عبر الإنترنت (المحرك الأساسي للصوت العربي)
+edge-tts
+
+# 8. Audio Enhancement (Layer 2) + Speed Control (Layer 4)
 noisereduce   # إزالة الضوضاء من عينة الصوت المرجعية
 librosa       # resample + time_stretch للتحكم في السرعة
 
@@ -63,3 +66,9 @@ vocos
 wandb
 x_transformers
 datasets
+
+# 11. CosyVoice 2 — بديل محسَّن للاستنساخ الصوتي العربي (اختياري)
+#     يُفعَّل بإضافة --build-arg COSYVOICE_INSTALL=true عند بناء Docker
+#     التحميل: النموذج iic/CosyVoice2-0.5B عبر ModelScope (~2GB تُحفَظ في volume)
+#     cosyvoice
+#     modelscope

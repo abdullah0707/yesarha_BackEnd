@@ -11,6 +11,7 @@ from app.models.ledger import CreditTransaction, UsageLog, Payment
 from app.models.operations import Goal, Project, Task, Execution
 from app.models.pricing import ServicePricing, CreditPolicy
 from app.models.ai import AIModel, Agent, AgentEvaluation
+from app.models.security import SecurityEvent, BlockedIP, TrustedIP
 
 __all__ = [
     "Admin", "User", "RuntimeSetting",
@@ -23,4 +24,5 @@ __all__ = [
     "Goal", "Project", "Task", "Execution",
     "ServicePricing", "CreditPolicy",
     "AIModel", "Agent", "AgentEvaluation",
+    "SecurityEvent", "BlockedIP", "TrustedIP",
 ]

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     VRAM_CORE_RESERVED_GB: float = 5.5    # محجوز لـ Core دائماً
     MODEL_IDLE_TIMEOUT_SECONDS: int = 300  # تفريغ النموذج بعد 5 دقائق خمول
 
+    # ── STABLE DIFFUSION (Image Generation) ──────────────────────
+    SD_BASE_URL: str = "http://stable-diffusion:7860"
+    SD_ENABLED: bool = True
+
     # ── WEB INTELLIGENCE ─────────────────────────────────────────
     SEARXNG_URL: str = "http://searxng:8080"
     WEB_SEARCH_MAX_RESULTS: int = 10
@@ -54,6 +58,9 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["*"]
     RATE_LIMIT_PER_MINUTE: int = 60
     INTERNAL_API_KEY: str = "CHANGE_ME_INTERNAL_KEY"  # للاتصالات الداخلية
+    # CIDRs إضافية موثوقة (تُضاف للـ localhost + Docker + private ranges الافتراضية)
+    # مثال في .env: TRUSTED_PROXIES="1.2.3.4,5.6.7.0/24"
+    TRUSTED_PROXIES: str = ""
 
     # ── SPECIALIST MODELS ─────────────────────────────────────────
     SPECIALIST_BASE_PATH: str = "data/specialists"

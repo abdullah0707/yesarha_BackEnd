@@ -26,14 +26,19 @@ def _admin_payload(admin: Admin) -> dict:
 @limiter.limit("10/minute")
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
 
+    from app.services.security_service import record_login_failure, record_login_success
+    ip = request.client.host if request.client else "unknown"
+
     admin = db.query(Admin).filter(Admin.email == payload.email).first()
 
     if not admin or not verify_password(payload.password, admin.password_hash):
+        record_login_failure(db, ip, "/api/v1/auth/login")
         raise AppError(ErrorCodes.INVALID_CREDENTIALS, "Invalid email or password", 401)
 
     if admin.status != "active":
         raise AppError(ErrorCodes.FORBIDDEN, "Admin account is suspended", 403)
 
+    record_login_success(ip)
     admin.last_login_at = datetime.utcnow()
     db.commit()
 

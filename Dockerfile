@@ -21,13 +21,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # VOICE_CACHE_BUST=<timestamp> لكسر cache الـ Docker layer عند الحاجة
 ARG VOICE_INSTALL=false
 ARG VOICE_CACHE_BUST=1
+ARG COSYVOICE_INSTALL=false
 COPY requirements-voice.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    echo "VOICE_INSTALL=$VOICE_INSTALL | BUST=$VOICE_CACHE_BUST" && \
+    echo "VOICE_INSTALL=$VOICE_INSTALL | COSYVOICE=$COSYVOICE_INSTALL | BUST=$VOICE_CACHE_BUST" && \
     if [ "$VOICE_INSTALL" = "true" ]; then \
       pip install -r requirements-voice.txt && \
       pip install habibi-tts --no-deps && \
       pip install f5-tts --no-deps; \
+    fi && \
+    if [ "$COSYVOICE_INSTALL" = "true" ]; then \
+      pip install cosyvoice modelscope || echo "⚠ CosyVoice2 install failed — skipped"; \
     fi
 
 COPY app ./app

@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
 from app.core.rate_limit import limiter
 from app.db.session import engine
+from sqlalchemy import text
 from app.models import *  # noqa
 
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # 60 MB — كافٍ لأي ملف صوتي عملي
@@ -36,6 +37,7 @@ from app.api.v1.admin.tech_manager import router as tech_manager_router
 from app.api.v1.admin.registry import router as registry_router
 from app.api.v1.admin.gateway import router as gateway_router
 from app.api.v1.admin.training import router as training_router
+from app.api.v1.admin.security import router as security_router
 
 # Core Intelligence
 from app.api.v1.core.chat import router as core_chat_router
@@ -48,6 +50,8 @@ from app.api.v1.specialist.voice import router as voice_router
 from app.api.v1.specialist.vision import router as vision_router
 from app.api.v1.specialist.bundle_chat import router as bundle_chat_router
 from app.api.v1.specialist.orchestrate import router as orchestrate_router
+from app.api.v1.specialist.pipeline import router as pipeline_router
+from app.api.v1.specialist.image_gen import router as image_gen_router
 
 
 _WEAK_JWT   = "CHANGE_ME_SUPER_SECRET_KEY"
@@ -116,19 +120,58 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger("yesarha.registry").warning(f"Startup registry sync failed: {_sync_err}")
 
+    # تحميل عناوين IP المحجوبة والموثوقة في الذاكرة
+    try:
+        from app.services.security_service import load_blocked_ips_from_db, load_trusted_ips_from_db
+        _sec_db = SessionLocal()
+        load_blocked_ips_from_db(_sec_db)
+        load_trusted_ips_from_db(_sec_db)
+        _sec_db.close()
+    except Exception as _sec_err:
+        import logging
+        logging.getLogger("yesarha.security").warning(f"Security cache load failed: {_sec_err}")
+
+    # تشغيل محلل الأمان AI
+    try:
+        from app.services.ai_security_analyzer import start_ai_analyzer
+        start_ai_analyzer()
+    except Exception as _ai_err:
+        import logging
+        logging.getLogger("yesarha.ai_security").warning(f"AI analyzer start failed: {_ai_err}")
+
     core_monitor.start()
     start_scheduler()
 
     yield  # التطبيق يعمل هنا
 
     # ── Shutdown ──
+    from app.services.ai_security_analyzer import stop_ai_analyzer
+    stop_ai_analyzer()
     core_monitor.stop()
     stop_scheduler()
+
+
+def _run_migrations() -> None:
+    """ترقيات بسيطة للأعمدة الجديدة — آمنة تُشغَّل في كل startup."""
+    migrations = [
+        "ALTER TABLE synced_content ADD COLUMN IF NOT EXISTS color_palette VARCHAR",
+        "ALTER TABLE blocked_ips ADD COLUMN IF NOT EXISTS is_ai_decision BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE blocked_ips ADD COLUMN IF NOT EXISTS ai_reasoning TEXT",
+        "ALTER TABLE blocked_ips ADD COLUMN IF NOT EXISTS ai_review_status VARCHAR(20)",
+    ]
+    try:
+        with engine.connect() as conn:
+            for sql in migrations:
+                conn.execute(text(sql))
+            conn.commit()
+    except Exception:
+        pass
 
 
 def create_app() -> FastAPI:
     from app.db.session import Base
     Base.metadata.create_all(bind=engine)
+    _run_migrations()
 
     app = FastAPI(
         title=settings.APP_NAME,
@@ -149,6 +192,9 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
+
+    from app.middleware.security_middleware import SecurityMiddleware
+    app.add_middleware(SecurityMiddleware)
 
     @app.middleware("http")
     async def enforce_max_body_size(request: Request, call_next):
@@ -182,6 +228,7 @@ def create_app() -> FastAPI:
     app.include_router(registry_router,          prefix=p)
     app.include_router(gateway_router,           prefix=p)
     app.include_router(training_router,          prefix=p)
+    app.include_router(security_router,          prefix=p)
     app.include_router(core_chat_router,         prefix=p)
     app.include_router(education_router,         prefix=p)
     app.include_router(public_specialist_router, prefix=p)
@@ -190,6 +237,8 @@ def create_app() -> FastAPI:
     app.include_router(vision_router,            prefix=p)
     app.include_router(bundle_chat_router,       prefix=p)
     app.include_router(orchestrate_router,       prefix=p)
+    app.include_router(pipeline_router,          prefix=p)
+    app.include_router(image_gen_router,         prefix=p)
 
     return app
 

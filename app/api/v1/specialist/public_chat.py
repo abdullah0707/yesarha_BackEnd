@@ -22,7 +22,7 @@ from app.services.ollama_client import OllamaClient
 from app.services.runtime_config import runtime_cfg
 from app.core.intelligence.async_bridge import sync_gen_to_async
 from app.core.intelligence.api_keys import get_specialist_by_api_key
-from app.core.prompts import build_system_prompt
+from app.core.prompts import build_system_prompt, detect_language
 
 _SPEED_OPTIONS = {"temperature": 0.1, "num_predict": 1024}
 
@@ -62,7 +62,10 @@ async def ask_specialist(
         )
 
     client = OllamaClient()
-    messages = [{"role": "system", "content": build_system_prompt(specialist.system_prompt or "")}]
+    cfg = specialist.config_json or {}
+    intro = cfg.get("intro_text") or f"أنا {specialist.display_name}، مساعد متخصص من يسرها."
+    lang = detect_language(payload.message)
+    messages = [{"role": "system", "content": build_system_prompt(specialist.system_prompt or "", intro_text=intro, detected_lang=lang)}]
     if payload.history:
         messages.extend(payload.history[-6:])
     messages.append({"role": "user", "content": payload.message})
@@ -105,7 +108,10 @@ async def _stream_response(
     client_ip: str | None = None,
 ):
     client = OllamaClient()
-    messages = [{"role": "system", "content": build_system_prompt(specialist.system_prompt or "")}]
+    cfg = specialist.config_json or {}
+    intro = cfg.get("intro_text") or f"أنا {specialist.display_name}، مساعد متخصص من يسرها."
+    lang = detect_language(payload.message)
+    messages = [{"role": "system", "content": build_system_prompt(specialist.system_prompt or "", intro_text=intro, detected_lang=lang)}]
     if payload.history:
         messages.extend(payload.history[-6:])
     messages.append({"role": "user", "content": payload.message})

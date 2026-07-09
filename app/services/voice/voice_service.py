@@ -10,11 +10,13 @@ Architecture:
 تحميل النماذج عند أول استخدام (lazy loading) لتوفير VRAM.
 """
 import io
+import json
 import os
 import re
 import logging
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 
 # XTTS-v2 يطلب قبول الـ Terms of Service — نوافق تلقائياً في بيئة السيرفر
@@ -78,9 +80,14 @@ logger = logging.getLogger("yesarha.voice")
 
 # ── Lazy-loaded models (لا يُحمَّلان حتى الطلب الأول) ───────────────────────
 
-_whisper_model = None
-_xtts_model    = None
-_xtts_config   = None
+_whisper_model     = None
+_xtts_model        = None
+_xtts_config       = None
+_cosyvoice2_model  = None
+_cosyvoice2_lock   = threading.Lock()
+
+# استنساخ الصوت مؤجَّل حتى نشر المشروع على سيرفر سحابي بنموذج أقوى
+_CLONE_ENABLED: bool = False
 
 
 def _get_whisper_model_name() -> str:
@@ -397,6 +404,209 @@ def _apply_tashkeel(text: str) -> str:
         return text
 
 
+# ── Auto-Tashkeel Layer ────────────────────────────────────────────────────────
+# يشكّل النص العربي تلقائياً قبل Edge-TTS لتحسين الجودة الصوتية.
+# يحمي الأسماء الخاصة (قائمة قابلة للتعديل) والكلمات الإنجليزية والأرقام.
+
+# الكلمات الافتراضية — تُكتب في الملف عند أول تشغيل ثم تصبح قابلة للتعديل/الحذف من Dashboard.
+# عند إضافة كلمات جديدة: ارفع _SEED_VERSION بحرف واحد ليُطبَّق التحديث على الملفات الموجودة.
+_SEED_VERSION = "v2"
+_SEED_OVERRIDES: dict[str, str] = {
+    # اسم المشروع
+    "يسرها":  "يِسَرْها",
+    # تحيات وترحيب
+    "مرحبا":  "مَرْحَباً",
+    "مرحباً": "مَرْحَباً",
+    "أهلا":   "أَهْلاً",
+    "أهلاً":  "أَهْلاً",
+    "أهلين":  "أَهْلَيْن",
+    # مجاملات شائعة
+    "شكرا":   "شُكْراً",
+    "شكراً":  "شُكْراً",
+    "عفوا":   "عَفْواً",
+    "عفواً":  "عَفْواً",
+    # أفعال شائعة في السياق التعليمي
+    "يسرنا":  "يَسُرُّنا",
+    "يسعدنا": "يَسْعَدُنا",
+}
+
+_tashkeel_overrides_cache: dict[str, str] | None = None
+_tashkeel_protected_cache: set[str] | None = None
+
+
+def _tashkeel_config_path() -> "Path":
+    return Path(settings.XTTS_MODEL_PATH) / "tashkeel_config.json"
+
+
+def _load_tashkeel_config() -> "tuple[dict[str, str], set[str]]":
+    try:
+        p = _tashkeel_config_path()
+        if p.exists():
+            data = json.loads(p.read_text("utf-8"))
+            # ترحيل من الصيغة القديمة {"words": [...]}
+            if "words" in data and "overrides" not in data:
+                overrides = dict(_SEED_OVERRIDES)
+                protected = set(data.get("words", []))
+                _save_tashkeel_config(overrides, protected)
+                return overrides, protected
+            overrides = dict(data.get("overrides", {}))
+            protected = set(data.get("protected", []))
+            # دمج الكلمات الجديدة عند رفع _SEED_VERSION (لا تُعيد كلمة حذفها المستخدم)
+            if data.get("seed_version") != _SEED_VERSION:
+                for word, diac in _SEED_OVERRIDES.items():
+                    if word not in overrides:
+                        overrides[word] = diac
+                _save_tashkeel_config(overrides, protected)
+            return overrides, protected
+        # أول تشغيل — ننشئ الملف بالكلمات الافتراضية
+        overrides = dict(_SEED_OVERRIDES)
+        _save_tashkeel_config(overrides, set())
+        return overrides, set()
+    except Exception:
+        pass
+    return dict(_SEED_OVERRIDES), set()
+
+
+def _save_tashkeel_config(overrides: "dict[str, str]", protected: "set[str]") -> None:
+    try:
+        p = _tashkeel_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(
+            {
+                "seed_version": _SEED_VERSION,
+                "overrides":    dict(sorted(overrides.items())),
+                "protected":    sorted(protected),
+            },
+            ensure_ascii=False, indent=2,
+        ), "utf-8")
+    except Exception as e:
+        logger.warning(f"tashkeel config save failed: {e}")
+
+
+def _ensure_tashkeel_cache() -> None:
+    global _tashkeel_overrides_cache, _tashkeel_protected_cache
+    if _tashkeel_overrides_cache is None:
+        _tashkeel_overrides_cache, _tashkeel_protected_cache = _load_tashkeel_config()
+
+
+def _all_overrides() -> "dict[str, str]":
+    _ensure_tashkeel_cache()
+    return dict(_tashkeel_overrides_cache or {})
+
+
+def _all_protected() -> "set[str]":
+    _ensure_tashkeel_cache()
+    return _tashkeel_protected_cache or set()
+
+
+def get_tashkeel_config() -> dict:
+    """يُرجع إعدادات التشكيل: overrides (تشكيل مخصص) + protected (بدون تشكيل)."""
+    return {"overrides": _all_overrides(), "protected": sorted(_all_protected())}
+
+
+def add_tashkeel_override(word: str, tashkeel: str) -> dict:
+    """إضافة أو تحديث تشكيل مخصص: كلمة → شكلها الصحيح."""
+    global _tashkeel_overrides_cache
+    _ensure_tashkeel_cache()
+    if _tashkeel_overrides_cache is None:
+        _tashkeel_overrides_cache = {}
+    _tashkeel_overrides_cache[word] = tashkeel
+    _save_tashkeel_config(_tashkeel_overrides_cache, _tashkeel_protected_cache or set())
+    return get_tashkeel_config()
+
+
+def remove_tashkeel_override(word: str) -> dict:
+    """حذف تشكيل مخصص."""
+    global _tashkeel_overrides_cache
+    _ensure_tashkeel_cache()
+    if _tashkeel_overrides_cache:
+        _tashkeel_overrides_cache.pop(word, None)
+    _save_tashkeel_config(_tashkeel_overrides_cache or {}, _tashkeel_protected_cache or set())
+    return get_tashkeel_config()
+
+
+def add_tashkeel_protected(word: str) -> dict:
+    """إضافة كلمة تمرّ بدون أي تشكيل (مصطلحات أجنبية...)."""
+    global _tashkeel_protected_cache
+    _ensure_tashkeel_cache()
+    if _tashkeel_protected_cache is None:
+        _tashkeel_protected_cache = set()
+    _tashkeel_protected_cache.add(word)
+    _save_tashkeel_config(_tashkeel_overrides_cache or {}, _tashkeel_protected_cache)
+    return get_tashkeel_config()
+
+
+def remove_tashkeel_protected(word: str) -> dict:
+    """حذف كلمة من القائمة المحمية."""
+    global _tashkeel_protected_cache
+    _ensure_tashkeel_cache()
+    if _tashkeel_protected_cache:
+        _tashkeel_protected_cache.discard(word)
+    _save_tashkeel_config(_tashkeel_overrides_cache or {}, _tashkeel_protected_cache or set())
+    return get_tashkeel_config()
+
+
+def smart_tashkeel(text: str) -> str:
+    """
+    يشكّل النص العربي مع:
+    - overrides : كلمات لها تشكيل مخصص — تُستبدَل مباشرة ثم تُحمى من Mishkal.
+    - protected : كلمات تمرّ بدون أي تشكيل.
+    - المسافات الطرفية لكل مقطع تُحفَظ يدوياً لأن Mishkal يحذفها.
+    """
+    if not text.strip():
+        return text
+
+    overrides = _all_overrides()
+    protected = _all_protected()
+
+    def _yn(s: str) -> str:
+        return re.sub(r"[ىی]", "ي", s)
+
+    overrides_norm = {_yn(k): v for k, v in overrides.items()}
+    protected_norm = {_yn(w) for w in protected}
+
+    def _check(word: str) -> "tuple[str, str]":
+        bare = re.sub(r"[^؀-ۿ]", "", word)
+        bare_n = _yn(bare)
+        if bare in overrides or bare_n in overrides_norm:
+            return "override", overrides.get(bare) or overrides_norm.get(bare_n, word)
+        if bare in protected or bare_n in protected_norm:
+            return "protect", word
+        if re.search(r"[A-Za-z0-9]", word) or not bare:
+            return "protect", word
+        return "arabic", word
+
+    tokens = re.split(r"(\s+)", text)
+    result: list[str] = []
+    chunk: list[str] = []
+
+    def _flush() -> None:
+        if not chunk:
+            return
+        joined = "".join(chunk)
+        lws = joined[: len(joined) - len(joined.lstrip())]
+        rws = joined[len(joined.rstrip()):]
+        inner = joined.strip()
+        result.append(lws + (_apply_tashkeel(inner) if inner else inner) + rws)
+        chunk.clear()
+
+    for tok in tokens:
+        if not tok:
+            continue
+        if re.fullmatch(r"\s+", tok):
+            chunk.append(tok)
+        else:
+            action, val = _check(tok)
+            if action == "arabic":
+                chunk.append(tok)
+            else:
+                _flush()
+                result.append(val)
+
+    _flush()
+    return "".join(result)
+
+
 def classify_context(text: str) -> str:
     """يُحدد السياق التعليمي للنص بمطابقة معجم الكلمات المفتاحية."""
     for context in ["encouragement", "correction", "explanation", "summary"]:
@@ -639,12 +849,10 @@ def _edge_tts_single_call(
     text: str,
     voice: str,
     rate: str = "+0%",
-    pitch: str = "+0Hz",
-    volume: str = "+0%",
 ) -> bytes:
     """
-    نداء واحد لـ Edge-TTS بـ prosody كامل — يُرجع WAV bytes.
-    دالة داخلية تُستدعى من synthesize_with_edge_tts وsynthesize_human_voice.
+    نداء واحد لـ Edge-TTS — يُرجع WAV bytes.
+    يُمرَّر rate فقط؛ pitch وvolume محذوفان لتجنب تعارضات SSML في بعض إصدارات edge-tts.
     تعمل في thread منفصل لتجنّب تعارض event loop مع FastAPI.
     """
     try:
@@ -657,7 +865,7 @@ def _edge_tts_single_call(
 
     def _run() -> None:
         async def _stream() -> None:
-            comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
+            comm = edge_tts.Communicate(text, voice, rate=rate)
             async for chunk in comm.stream():
                 if chunk["type"] == "audio":
                     mp3_chunks.append(chunk["data"])
@@ -690,7 +898,7 @@ def _edge_tts_single_call(
              "-ar", "22050", "-ac", "1", wav_path],
             capture_output=True, timeout=30, check=True
         )
-        logger.info(f"Edge-TTS call: voice={voice}, rate={rate}, pitch={pitch}")
+        logger.info(f"Edge-TTS call: voice={voice}, rate={rate}")
         return Path(wav_path).read_bytes()
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"ffmpeg فشل في التحويل: {e.stderr.decode()[:200]}")
@@ -726,14 +934,15 @@ def synthesize_human_voice(
     """
     يُولّد صوتاً بشرياً طبيعياً — استدعاء Edge-TTS واحد للنص كاملاً.
     Edge-TTS يُدير التوقفات عند علامات الترقيم تلقائياً بدون تقطيع أو stitching.
-    """
-    # 1. تشكيل للهجات الفصيحة
-    if dialect in MSA_DIALECTS:
-        text = _apply_tashkeel(text)
 
-    # 2. تصنيف السياق العام وتحديد نبرة موحَّدة للنص كله
+    """
+    # 1. تصنيف السياق قبل التشكيل (الكلمات المفتاحية بدون حركات)
     context = classify_context(text)
     profile = PROSODY_PROFILES[context]
+
+    # 2. تشكيل تلقائي للعربية — يحسّن النطق بشكل كبير
+    if language.startswith("ar"):
+        text = smart_tashkeel(text)
 
     # 3. Rate مُركَّب: نبرة السياق + سرعة المستخدم
     speed_offset = int(round((speed - 1.0) * 100))
@@ -743,7 +952,7 @@ def synthesize_human_voice(
         p_rate = 0
     combined_rate = f"{p_rate + speed_offset:+d}%"
 
-    # 4. اختيار الصوت
+    # 3. اختيار الصوت
     if voice_id:
         voice = voice_id
     elif dialect in DIALECT_VOICES:
@@ -753,8 +962,8 @@ def synthesize_human_voice(
 
     logger.info(f"Human voice: voice={voice}, context={context}, rate={combined_rate}, dialect={dialect}")
 
-    # 5. استدعاء واحد بالنص الكامل — لا تقطيع ولا stitching ولا artifacts
-    return _edge_tts_single_call(text, voice, rate=combined_rate, pitch=profile["pitch"], volume=profile["volume"])
+    # 4. استدعاء واحد بالنص الكامل — بدون pitch/volume لتجنب تعارضات SSML
+    return _edge_tts_single_call(text, voice, rate=combined_rate)
 
 
 # ── Habibi-TTS: Voice Cloning (Primary) ──────────────────────────────────────
@@ -781,16 +990,119 @@ HABIBI_DIALECT_MAP: dict[str, str] = {
 }
 
 
+_HABIBI_REF_FALLBACK = "مرحبا كيف حالك اليوم"
+
 def _habibi_get_ref_text(ref_audio_bytes: bytes) -> str:
-    """يستخرج نص الصوت المرجعي باستخدام Whisper المثبَّت مسبقاً."""
+    """
+    يستخرج نص الصوت المرجعي باستخدام Whisper.
+    يُرجع fallback عام إذا فشل Whisper أو أعاد نصاً فارغاً.
+    F5-TTS يحتاج ref_text غير فارغ لإنتاج صوت مكتمل.
+    """
     try:
         result = transcribe_audio(ref_audio_bytes, language="ar")
         text = result.get("text", "").strip()
-        logger.info(f"Habibi ref transcription: '{text[:60]}'")
-        return text
+        if text:
+            logger.info(f"Habibi ref transcription: '{text[:60]}'")
+            return text
+        logger.warning("Habibi ref transcription returned empty — using fallback ref_text")
+        return _HABIBI_REF_FALLBACK
     except Exception as e:
-        logger.warning(f"Habibi ref transcription failed ({e}) — using empty ref_text")
-        return ""
+        logger.warning(f"Habibi ref transcription failed ({e}) — using fallback ref_text")
+        return _HABIBI_REF_FALLBACK
+
+
+_HABIBI_CHUNK_MAX = 280   # حرف — الحد الآمن لـ F5-TTS قبل تدهور الجودة
+
+
+def _split_text_for_habibi(text: str) -> list[str]:
+    """
+    يقسّم النص الطويل إلى قطع آمنة لـ Habibi-TTS.
+    يقطع عند نهايات الجمل (. ! ? ؟ ، \n) مع الحفاظ على المعنى.
+    """
+    import re
+    if len(text) <= _HABIBI_CHUNK_MAX:
+        return [text.strip()]
+
+    # قسّم على حدود الجمل
+    sentences = re.split(r'(?<=[.!?؟،\n])\s+', text.strip())
+    chunks, current = [], ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 <= _HABIBI_CHUNK_MAX:
+            current = (current + " " + sent).strip() if current else sent
+        else:
+            if current:
+                chunks.append(current)
+            # جملة طويلة جداً → اقطعها بعنف عند الفراغ
+            if len(sent) > _HABIBI_CHUNK_MAX:
+                words = sent.split()
+                part = ""
+                for w in words:
+                    if len(part) + len(w) + 1 <= _HABIBI_CHUNK_MAX:
+                        part = (part + " " + w).strip() if part else w
+                    else:
+                        if part:
+                            chunks.append(part)
+                        part = w
+                current = part
+            else:
+                current = sent
+    if current:
+        chunks.append(current)
+    return [c for c in chunks if c.strip()]
+
+
+def _run_habibi_chunk(text: str, ref_path: str, ref_text: str,
+                      habibi_dialect: str, out_dir: str, idx: int) -> bytes:
+    """يُشغّل Habibi-TTS على قطعة نص واحدة، يُرجع WAV bytes."""
+    chunk_out = os.path.join(out_dir, f"chunk_{idx:03d}")
+    os.makedirs(chunk_out, exist_ok=True)
+    cmd = [
+        "habibi-tts_infer-cli",
+        "--ref_audio",  ref_path,
+        "--ref_text",   ref_text,
+        "--gen_text",   text,
+        "--dialect",    habibi_dialect,
+        "--output_dir", chunk_out,
+        "--nfe_step",   "64",
+        "--speed",      "1.0",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"habibi-tts_infer-cli فشل (chunk {idx}, code {result.returncode}): "
+            f"{result.stderr[-300:]}"
+        )
+    wav_files = sorted(
+        [f for f in os.listdir(chunk_out) if f.endswith(".wav")],
+        key=lambda f: os.path.getmtime(os.path.join(chunk_out, f))
+    )
+    if not wav_files:
+        raise RuntimeError(f"Habibi-TTS: لم يُنتج WAV للقطعة {idx}")
+    return Path(os.path.join(chunk_out, wav_files[-1])).read_bytes()
+
+
+def _concat_wav_chunks(wav_chunks: list[bytes]) -> bytes:
+    """يدمج قائمة WAV bytes في ملف WAV واحد بـ soundfile."""
+    import io
+    import numpy as np
+    try:
+        import soundfile as sf
+        arrays, sr = [], None
+        for chunk_bytes in wav_chunks:
+            buf = io.BytesIO(chunk_bytes)
+            data, sample_rate = sf.read(buf, dtype="float32")
+            if sr is None:
+                sr = sample_rate
+            if data.ndim > 1:
+                data = data[:, 0]   # mono
+            arrays.append(data)
+        merged = np.concatenate(arrays)
+        out_buf = io.BytesIO()
+        sf.write(out_buf, merged, sr, format="WAV", subtype="PCM_16")
+        return out_buf.getvalue()
+    except Exception:
+        # fallback: رجع أطول قطعة إذا فشل الدمج
+        return max(wav_chunks, key=len)
 
 
 def synthesize_with_habibi(
@@ -800,27 +1112,15 @@ def synthesize_with_habibi(
 ) -> bytes:
     """
     يُولّد صوتاً بصوت المحاضر باستخدام Habibi-TTS.
-    يتطلب: pip install habibi-tts (مثبَّت في requirements-voice.txt).
-    عند الاستدعاء الأول يُحمَّل النموذج من HuggingFace (~2GB — مرة واحدة فقط).
-
-    Args:
-        text:           النص المراد توليده بصوت المحاضر.
-        ref_audio_bytes: عينة صوت المحاضر (WAV — معالجة مسبقاً بـ Layer 2).
-        dialect:        locale code مثل 'ar-SA' — يُحوَّل لـ Habibi dialect ID.
-
-    Returns:
-        WAV bytes للصوت المُولَّد.
+    يُقسّم النصوص الطويلة تلقائياً ويدمج النتيجة في ملف واحد.
     """
     import shutil
 
     habibi_dialect = HABIBI_DIALECT_MAP.get(dialect, "MSA")
-
-    # 1. استخراج نص الصوت المرجعي بـ Whisper
     ref_text = _habibi_get_ref_text(ref_audio_bytes)
 
     tmp_dir = tempfile.mkdtemp(prefix="habibi_")
     try:
-        # 2. كتابة الصوت المرجعي لملف مؤقت
         ref_path = os.path.join(tmp_dir, "ref.wav")
         with open(ref_path, "wb") as f:
             f.write(ref_audio_bytes)
@@ -828,48 +1128,27 @@ def synthesize_with_habibi(
         out_dir = os.path.join(tmp_dir, "out")
         os.makedirs(out_dir, exist_ok=True)
 
-        # 3. استدعاء Habibi-TTS CLI
-        cmd = [
-            "habibi-tts_infer-cli",
-            "--ref_audio",  ref_path,
-            "--ref_text",   ref_text,
-            "--gen_text",   text,
-            "--dialect",    habibi_dialect,
-            "--output_dir", out_dir,
-            "--nfe_step",   "32",       # جودة معقولة + سرعة
-            "--speed",      "1.0",
-        ]
-        logger.info(f"Habibi-TTS: dialect={habibi_dialect}, ref_text='{ref_text[:40]}'")
+        chunks = _split_text_for_habibi(text)
+        logger.info(f"Habibi-TTS: {len(chunks)} chunk(s), dialect={habibi_dialect}")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True,
-            timeout=600,    # أول تشغيل يُحمِّل النموذج (~500MB) — نعطيه 10 دقائق
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"habibi-tts_infer-cli فشل (code {result.returncode}): "
-                f"{result.stderr[-400:]}"
+        wav_chunks = []
+        for idx, chunk_text in enumerate(chunks):
+            wav_bytes = _run_habibi_chunk(
+                chunk_text, ref_path, ref_text, habibi_dialect, out_dir, idx
             )
+            wav_chunks.append(wav_bytes)
+            logger.info(f"  chunk {idx+1}/{len(chunks)}: {len(wav_bytes)//1024}KB")
 
-        # 4. قراءة ملف الناتج (أحدث WAV في مجلد الخرج)
-        wav_files = sorted(
-            [f for f in os.listdir(out_dir) if f.endswith(".wav")],
-            key=lambda f: os.path.getmtime(os.path.join(out_dir, f))
-        )
-        if not wav_files:
-            raise RuntimeError("Habibi-TTS: لم يُنتج أي ملف WAV في مجلد الخرج")
+        if len(wav_chunks) == 1:
+            audio_bytes = wav_chunks[0]
+        else:
+            audio_bytes = _concat_wav_chunks(wav_chunks)
 
-        out_path = os.path.join(out_dir, wav_files[-1])
-        audio_bytes = Path(out_path).read_bytes()
-        logger.info(f"✅ Habibi-TTS done: {len(audio_bytes)//1024}KB, dialect={habibi_dialect}")
+        logger.info(f"✅ Habibi-TTS done: {len(audio_bytes)//1024}KB total")
         return audio_bytes
 
     except FileNotFoundError:
-        raise RuntimeError(
-            "habibi-tts_infer-cli غير موجود — ثبّته بـ: pip install habibi-tts"
-        )
+        raise RuntimeError("habibi-tts_infer-cli غير موجود — ثبّته بـ: pip install habibi-tts")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -931,6 +1210,87 @@ def _get_xtts_default_speaker(tts) -> str:
     return _XTTS_FALLBACK_SPEAKER
 
 
+# ── CosyVoice 2 — Voice Cloning (optional, lazy-loaded) ──────────────────────
+# يُحمَّل فقط إذا كانت الحزمة مثبَّتة؛ الباقي يعمل بدونه.
+
+def _get_cosyvoice2():
+    """يُحمّل CosyVoice 2 كسوليًا — يُرجع None إذا لم يكن مثبَّتاً أو النموذج غير موجود."""
+    global _cosyvoice2_model
+    if _cosyvoice2_model is not None:
+        return _cosyvoice2_model
+    with _cosyvoice2_lock:
+        if _cosyvoice2_model is not None:
+            return _cosyvoice2_model
+        try:
+            from cosyvoice.cli.cosyvoice import CosyVoice2  # type: ignore
+            model_dir = Path(settings.XTTS_MODEL_PATH) / "CosyVoice2-0.5B"
+            if not model_dir.exists():
+                logger.info("CosyVoice2: النموذج غير موجود — جارٍ التحميل (~2GB)...")
+                try:
+                    from modelscope import snapshot_download  # type: ignore
+                    snapshot_download("iic/CosyVoice2-0.5B", local_dir=str(model_dir))
+                except Exception as dl_err:
+                    logger.warning(f"CosyVoice2: فشل تحميل النموذج: {dl_err}")
+                    return None
+            _cosyvoice2_model = CosyVoice2(str(model_dir), load_jit=False, load_trt=False)
+            logger.info("✅ CosyVoice2 جاهز")
+            return _cosyvoice2_model
+        except ImportError:
+            logger.debug("cosyvoice غير مثبَّت — يُتخطى")
+            return None
+        except Exception as e:
+            logger.warning(f"CosyVoice2: فشل التحميل: {e}")
+            return None
+
+
+def _synthesize_cosyvoice2(text: str, ref_audio: bytes) -> Optional[bytes]:
+    """
+    يُنتج صوتاً مُستنسَخاً بـ CosyVoice 2 (zero-shot).
+    يُرجع None عند أي فشل — المستدعي ينتقل للـ fallback.
+    """
+    try:
+        import torch
+        import torchaudio
+        from cosyvoice.utils.file_utils import load_wav  # type: ignore
+
+        model = _get_cosyvoice2()
+        if model is None:
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(ref_audio)
+            ref_path = f.name
+
+        try:
+            prompt_speech = load_wav(ref_path, 16000)
+            prompt_text   = _habibi_get_ref_text(ref_audio)  # Whisper يستخرج النص المرجعي
+
+            results = list(model.inference_zero_shot(
+                tts_text=text,
+                prompt_text=prompt_text,
+                prompt_speech_16k=prompt_speech,
+                stream=False,
+            ))
+
+            if not results:
+                return None
+
+            tensors = [r["tts_speech"] for r in results]
+            combined = torch.cat(tensors, dim=1) if len(tensors) > 1 else tensors[0]
+
+            buf = io.BytesIO()
+            torchaudio.save(buf, combined, model.sample_rate, format="wav")
+            buf.seek(0)
+            logger.info(f"✅ CosyVoice2: {len(buf.getvalue())//1024}KB")
+            return buf.read()
+        finally:
+            os.unlink(ref_path)
+
+    except Exception as e:
+        logger.warning(f"CosyVoice2 synthesis failed: {e}")
+        return None
+
+
 def synthesize_speech(
     text: str,
     language: str = "ar",
@@ -954,7 +1314,8 @@ def synthesize_speech(
     Returns:
         bytes (WAV audio)
     """
-    if not speaker_wav_bytes:
+    # الاستنساخ مؤجَّل — نوجّه مباشرةً لـ Edge-TTS + تشكيل
+    if not speaker_wav_bytes or not _CLONE_ENABLED:
         return synthesize_human_voice(
             text=text,
             language=language,
@@ -964,15 +1325,25 @@ def synthesize_speech(
             speed=speed,
         )
 
+    # ─── الكود أدناه يعمل فقط لو _CLONE_ENABLED = True (مستقبلاً على السحابة) ───
+
     # Layer 2: تنقية عينة الصوت المرجعية
     enhanced_sample = enhance_voice_sample(speaker_wav_bytes)
-
-    # محاولة Habibi-TTS أولاً (جودة أعلى للعربية)
     is_arabic = language.startswith("ar")
+
+    # تشكيل تلقائي قبل أي استنساخ — يُحسّن نطق Arabic TTS بشكل جوهري
+    clone_text = smart_tashkeel(text) if is_arabic else text
+
     if is_arabic:
+        # أولوية 1: CosyVoice 2 (أفضل جودة للعربية — مثبَّت اختياريًا)
+        audio = _synthesize_cosyvoice2(clone_text, enhanced_sample)
+        if audio:
+            return apply_speed_control(audio, speed)
+
+        # أولوية 2: Habibi-TTS
         try:
             audio = synthesize_with_habibi(
-                text=text,
+                text=clone_text,
                 ref_audio_bytes=enhanced_sample,
                 dialect=dialect,
             )
@@ -980,8 +1351,8 @@ def synthesize_speech(
         except Exception as e:
             logger.warning(f"Habibi-TTS failed ({e}) — falling back to XTTS-v2")
 
-    # Fallback: XTTS-v2
-    processed_text = preprocess_arabic_for_tts(text, use_phonemes=False) if is_arabic else text
+    # أولوية 3 (Fallback): XTTS-v2
+    processed_text = preprocess_arabic_for_tts(clone_text, use_phonemes=False) if is_arabic else text
     tts, _ = _get_xtts()
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out_file:
@@ -1050,6 +1421,29 @@ def get_voice_sample(specialist_name: str) -> Optional[bytes]:
     return None
 
 
+def save_pipeline_voice_sample(voice_id: str, audio_bytes: bytes) -> str:
+    """يحفظ عينة صوت المحاضر بمعرّف UUID خاص بالـ pipeline التعليمي."""
+    import re
+    if not re.match(r'^[0-9a-f\-]{36}$', voice_id):
+        raise ValueError("voice_id must be a valid UUID")
+    samples_dir = Path(settings.XTTS_MODEL_PATH) / "voice_samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    sample_path = samples_dir / f"pipeline_{voice_id}.wav"
+    sample_path.write_bytes(audio_bytes)
+    return str(sample_path)
+
+
+def get_pipeline_voice_sample(voice_id: str) -> Optional[bytes]:
+    """يُرجع عينة صوت المحاضر بمعرّف UUID، أو None إذا لم تُوجد."""
+    import re
+    if not re.match(r'^[0-9a-f\-]{36}$', voice_id):
+        return None
+    sample_path = Path(settings.XTTS_MODEL_PATH) / "voice_samples" / f"pipeline_{voice_id}.wav"
+    if sample_path.exists():
+        return sample_path.read_bytes()
+    return None
+
+
 # نتيجة is_voice_ready مخزّنة — TTS import بطيء (~30s) لذا نتحقق مرة واحدة فقط
 _voice_ready_cache: Optional[dict] = None
 
@@ -1084,10 +1478,11 @@ def is_voice_ready() -> dict:
 
     import shutil
 
-    whisper_pkg   = False
-    xtts_pkg      = False
-    habibi_cli    = bool(shutil.which("habibi-tts_infer-cli"))
-    edge_online   = _check_edge_tts_connectivity()
+    whisper_pkg      = False
+    xtts_pkg         = False
+    cosyvoice2_pkg   = False
+    habibi_cli       = bool(shutil.which("habibi-tts_infer-cli"))
+    edge_online      = _check_edge_tts_connectivity()
     issues: list[str] = []
 
     try:
@@ -1102,18 +1497,34 @@ def is_voice_ready() -> dict:
     except (ImportError, Exception):
         issues.append("XTTS-v2 غير مثبَّت")
 
+    try:
+        import cosyvoice  # noqa  # type: ignore
+        cosyvoice2_pkg = True
+    except ImportError:
+        pass  # اختياري — لا يُضاف للـ issues
+
     if not habibi_cli:
-        issues.append("habibi-tts غير مثبَّت (clone test لن يعمل)")
+        issues.append("habibi-tts غير مثبَّت (استنساخ بـ Habibi لن يعمل)")
 
     if not edge_online:
         issues.append("Edge-TTS: لا يوجد وصول لشبكة Microsoft (TTS الأساسي لن يعمل)")
 
-    # الوضع الفعلي: TTS الأساسي هو Edge-TTS وليس XTTS-v2
-    tts_functional = edge_online   # Edge-TTS هو المسار الفعلي للتوليد
-    stt_functional = whisper_pkg   # Whisper للتحويل الصوتي
+    tts_functional = edge_online
+    stt_functional = whisper_pkg
+
+    clone_engine = (
+        "مؤجَّل" if not _CLONE_ENABLED else
+        "CosyVoice 2" if cosyvoice2_pkg else
+        "Habibi-TTS"  if habibi_cli     else
+        "XTTS-v2"     if xtts_pkg       else
+        "غير متاح"
+    )
 
     if tts_functional and stt_functional and not issues:
-        message = "✅ جاهز تماماً — Edge-TTS + Whisper + Habibi-TTS"
+        if _CLONE_ENABLED:
+            message = f"✅ جاهز تماماً — Edge-TTS + Whisper + استنساخ: {clone_engine}"
+        else:
+            message = "✅ جاهز — Edge-TTS + Whisper (الاستنساخ مؤجَّل)"
     elif tts_functional and stt_functional:
         message = f"⚠️ يعمل جزئياً — {' | '.join(issues)}"
     elif tts_functional and not stt_functional:
@@ -1124,16 +1535,19 @@ def is_voice_ready() -> dict:
         message = f"❌ غير جاهز — {' | '.join(issues)}"
 
     status = {
-        "whisper_available":   whisper_pkg,
-        "xtts_available":      xtts_pkg,
-        "habibi_available":    habibi_cli,
-        "edge_tts_online":     edge_online,
-        "cuda_available":      _has_cuda(),
-        "whisper_model":       _get_whisper_model_name(),
-        "tts_functional":      tts_functional,
-        "stt_functional":      stt_functional,
-        "message":             message,
-        "issues":              issues,
+        "whisper_available":     whisper_pkg,
+        "xtts_available":        xtts_pkg,
+        "cosyvoice2_available":  cosyvoice2_pkg,
+        "habibi_available":      habibi_cli,
+        "edge_tts_online":       edge_online,
+        "clone_engine":          clone_engine,
+        "clone_enabled":         _CLONE_ENABLED,
+        "cuda_available":        _has_cuda(),
+        "whisper_model":         _get_whisper_model_name(),
+        "tts_functional":        tts_functional,
+        "stt_functional":        stt_functional,
+        "message":               message,
+        "issues":                issues,
     }
 
     _voice_ready_cache = status

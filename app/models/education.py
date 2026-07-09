@@ -21,11 +21,12 @@ class SyncedContent(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     external_content_id = Column(String, nullable=False, unique=True, index=True)
 
-    title = Column(String, nullable=True)            # اختياري، للعرض في اللوحة فقط
-    raw_payload = Column(JSON, nullable=False)         # البيانات الخام كما وصلت من باك إند المستخدمين
-    chunks_json = Column(JSON, default=list)           # بعد التطبيع — جاهزة للبحث المحلي مباشرة
+    title = Column(String, nullable=True)
+    color_palette = Column(String, nullable=True)      # ألوان الكورس: "#1E3A5F,#D4A017,#FFFFFF"
+    raw_payload = Column(JSON, nullable=False)
+    chunks_json = Column(JSON, default=list)
 
-    synced_at = Column(DateTime, default=datetime.utcnow)       # آخر مرة وصل فيها تحديث
+    synced_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

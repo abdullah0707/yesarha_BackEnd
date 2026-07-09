@@ -26,30 +26,43 @@ def generate_bundle_key() -> str:
 
 def get_specialist_by_api_key(
     x_api_key: str = Header(default=None, alias="X-API-Key"),
+    authorization: str = Header(default=None),
     db: Session = Depends(get_db),
 ) -> SpecialistModel:
     """
-    FastAPI dependency للـ Public API — يتحقق من مفتاح API
-    ويُرجع النموذج المتخصص المرتبط به إن كان صالحاً ونشطاً.
+    FastAPI dependency للـ Public API — يتحقق من مفتاح API.
+    يقبل X-API-Key للمستخدمين الخارجيين، أو JWT Bearer للأدمن من Dashboard.
     """
-    if not x_api_key:
-        raise AppError(ErrorCodes.UNAUTHORIZED, "X-API-Key header مفقود", 401)
+    # مسار 1: X-API-Key (المستخدمون الخارجيون / باك إند المستخدمين)
+    if x_api_key:
+        specialist = db.query(SpecialistModel).filter(
+            SpecialistModel.api_key == x_api_key
+        ).first()
+        if not specialist:
+            raise AppError(ErrorCodes.UNAUTHORIZED, "مفتاح API غير صالح", 401)
+        if specialist.status != "active":
+            raise AppError(ErrorCodes.FORBIDDEN,
+                           f"النموذج '{specialist.display_name}' غير نشط (الحالة: {specialist.status})", 403)
+        if not specialist.is_public_api:
+            raise AppError(ErrorCodes.FORBIDDEN, "هذا النموذج غير متاح عبر API عام", 403)
+        return specialist
 
-    specialist = db.query(SpecialistModel).filter(
-        SpecialistModel.api_key == x_api_key
-    ).first()
+    # مسار 2: JWT Bearer للأدمن من لوحة التحكم (اختبار النموذج مباشرة)
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        from app.core.security import decode_token
+        payload = decode_token(token)
+        if payload and payload.get("type") == "access":
+            # الأدمن يحدد النموذج عبر X-API-Key عادةً — هنا نُرجع أول نموذج تعليمي نشط
+            specialist = db.query(SpecialistModel).filter(
+                SpecialistModel.specialization == "education",
+                SpecialistModel.status == "active",
+            ).first()
+            if specialist:
+                return specialist
+            raise AppError(ErrorCodes.NOT_FOUND, "لا يوجد نموذج تعليمي نشط", 404)
 
-    if not specialist:
-        raise AppError(ErrorCodes.UNAUTHORIZED, "مفتاح API غير صالح", 401)
-
-    if specialist.status != "active":
-        raise AppError(ErrorCodes.FORBIDDEN,
-                       f"النموذج '{specialist.display_name}' غير نشط حالياً (الحالة: {specialist.status})", 403)
-
-    if not specialist.is_public_api:
-        raise AppError(ErrorCodes.FORBIDDEN, "هذا النموذج غير متاح عبر API عام", 403)
-
-    return specialist
+    raise AppError(ErrorCodes.UNAUTHORIZED, "يجب إرسال X-API-Key أو Bearer token", 401)
 
 
 def get_bundle_by_api_key(
@@ -82,6 +95,70 @@ def get_bundle_by_api_key(
     _enforce_gateway_limits(bundle, db)
 
     return bundle
+
+
+def get_pipeline_auth(
+    x_api_key: str = Header(default=None, alias="X-API-Key"),
+    authorization: str = Header(default=None),
+    db: Session = Depends(get_db),
+) -> tuple:
+    """
+    Auth للـ pipeline endpoint — يقبل:
+    1. yesk_bundle_* → يجد education specialist من الحزمة + يطبق حدودها
+    2. أي مفتاح specialist → backward compatible (مباشر لنموذج متخصص)
+    3. Bearer JWT → admin testing
+    يُرجع (SpecialistModel, bundle|None)
+    """
+    # مسار 1: Bundle key
+    if x_api_key and x_api_key.startswith("yesk_bundle_"):
+        bundle = db.query(SpecialistBundle).filter(
+            SpecialistBundle.api_key == x_api_key
+        ).first()
+        if not bundle:
+            raise AppError(ErrorCodes.UNAUTHORIZED, "مفتاح الحزمة غير صالح", 401)
+        if bundle.status != "active":
+            raise AppError(ErrorCodes.FORBIDDEN, f"الحزمة '{bundle.name}' غير نشطة", 403)
+        _enforce_gateway_limits(bundle, db)
+        if not bundle.specialist_ids:
+            raise AppError(ErrorCodes.NOT_FOUND, "لا يوجد نماذج مرتبطة بهذه الحزمة", 404)
+        specialist = db.query(SpecialistModel).filter(
+            SpecialistModel.id.in_(bundle.specialist_ids),
+            SpecialistModel.specialization == "education",
+            SpecialistModel.status == "active",
+        ).first()
+        if not specialist:
+            raise AppError(ErrorCodes.NOT_FOUND, "لا يوجد نموذج تعليمي نشط في هذه الحزمة", 404)
+        return specialist, bundle
+
+    # مسار 2: Specialist API key (backward compatible)
+    if x_api_key:
+        specialist = db.query(SpecialistModel).filter(
+            SpecialistModel.api_key == x_api_key
+        ).first()
+        if not specialist:
+            raise AppError(ErrorCodes.UNAUTHORIZED, "مفتاح API غير صالح", 401)
+        if specialist.status != "active":
+            raise AppError(ErrorCodes.FORBIDDEN,
+                           f"النموذج '{specialist.display_name}' غير نشط (الحالة: {specialist.status})", 403)
+        if not specialist.is_public_api:
+            raise AppError(ErrorCodes.FORBIDDEN, "هذا النموذج غير متاح عبر API عام", 403)
+        return specialist, None
+
+    # مسار 3: Bearer JWT للأدمن
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        from app.core.security import decode_token
+        jwt_payload = decode_token(token)
+        if jwt_payload and jwt_payload.get("type") == "access":
+            specialist = db.query(SpecialistModel).filter(
+                SpecialistModel.specialization == "education",
+                SpecialistModel.status == "active",
+            ).first()
+            if specialist:
+                return specialist, None
+            raise AppError(ErrorCodes.NOT_FOUND, "لا يوجد نموذج تعليمي نشط", 404)
+
+    raise AppError(ErrorCodes.UNAUTHORIZED, "يجب إرسال X-API-Key أو Bearer token", 401)
 
 
 def _enforce_gateway_limits(bundle: SpecialistBundle, db: Session) -> None:

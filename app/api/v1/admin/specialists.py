@@ -5,7 +5,7 @@ Admin API للنماذج المتخصصة
 import json
 import re
 import time
-from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, field_validator
@@ -53,6 +53,7 @@ class CreateSpecialistRequest(BaseModel):
 
 class UpdateSpecialistRequest(BaseModel):
     display_name: Optional[str] = None
+    display_name_ar: Optional[str] = None
     system_prompt: Optional[str] = None
     status: Optional[str] = None
     is_public_api: Optional[bool] = None
@@ -414,11 +415,11 @@ def _background_specialist_setup(specialist_id: int):
             _cfg_update(specialist, db, 75, f"✅ تم تحميل '{final_model}' بنجاح", "downloading")
 
         # ── الخطوة 4: Warm-up ──
-        _cfg_update(specialist, db, 80, f"🔥 تهيئة '{base_model}' في الذاكرة...", "downloading")
-        model_manager.ensure_model_loaded(base_model, reserve_core=True)
-        specialist.ollama_model_name = base_model
+        _cfg_update(specialist, db, 80, f"🔥 تهيئة '{final_model}' في الذاكرة...", "downloading")
+        model_manager.ensure_model_loaded(final_model, reserve_core=True)
+        specialist.ollama_model_name = final_model
         db.commit()
-        _cfg_update(specialist, db, 90, f"✅ '{base_model}' جاهز", "downloading")
+        _cfg_update(specialist, db, 90, f"✅ '{final_model}' جاهز", "downloading")
 
         # ── الخطوة 5: API Key + تفعيل ──
         if not specialist.api_key:
@@ -622,12 +623,49 @@ def update_specialist(
     if data.get("status") == "active" and not spec.api_key:
         spec.api_key = generate_api_key(spec.specialization)
 
+    # config_json: دمج مع القيم الموجودة بدل الاستبدال الكامل
+    if "config_json" in data and data["config_json"] is not None:
+        merged = dict(spec.config_json or {})
+        merged.update(data.pop("config_json"))
+        data["config_json"] = merged
+
     for k, v in data.items():
         setattr(spec, k, v)
 
     db.commit()
     db.refresh(spec)
     return success(_serialize(spec, include_key=True))
+
+
+@router.put("/{specialist_id}/identity")
+def set_specialist_identity(
+    specialist_id: int,
+    intro_text: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(get_current_admin)
+):
+    """
+    تحديد الهوية الجاهزة للمتخصص — النص الحرفي الذي يقوله عند "من أنت؟".
+    مفصول تماماً عن system prompt التعليمات.
+    يُخزَّن في config_json["intro_text"].
+    """
+    spec = db.query(SpecialistModel).filter(SpecialistModel.id == specialist_id).first()
+    if not spec:
+        raise AppError(ErrorCodes.NOT_FOUND, "النموذج غير موجود", 404)
+
+    if not intro_text.strip():
+        raise HTTPException(400, "intro_text لا يمكن أن يكون فارغاً")
+
+    cfg = dict(spec.config_json or {})
+    cfg["intro_text"] = intro_text.strip()
+    spec.config_json = cfg
+    db.commit()
+
+    return success({
+        "message": "✅ تم تحديث هوية النموذج",
+        "specialist_id": specialist_id,
+        "intro_text": intro_text.strip(),
+    })
 
 
 @router.post("/{specialist_id}/regenerate-key")

@@ -32,6 +32,12 @@ from app.services.voice.voice_service import (
     preprocess_arabic_for_tts,
     enhance_voice_sample,
     apply_speed_control,
+    smart_tashkeel,
+    get_tashkeel_config,
+    add_tashkeel_override,
+    remove_tashkeel_override,
+    add_tashkeel_protected,
+    remove_tashkeel_protected,
     EDGE_TTS_VOICES,
     DIALECT_VOICES,
     MSA_DIALECTS,
@@ -445,6 +451,76 @@ async def warmup_voice(
     return success(result)
 
 
+# ── Tashkeel Config (Overrides + Protected) ───────────────────────────────────
+
+@router.get("/tashkeel")
+def get_tashkeel(
+    _: str = Depends(get_api_key_specialist),
+):
+    """إعدادات التشكيل: overrides (تشكيل مخصص) + protected (بدون تشكيل)."""
+    return success({**get_tashkeel_config(), "note": "overrides: تشكيل مخصص | protected: بدون تشكيل"})
+
+
+@router.post("/tashkeel/override")
+def upsert_override(
+    word:     str = Form(..., description="الكلمة بدون تشكيل"),
+    tashkeel: str = Form(..., description="الشكل المشكَّل الصحيح"),
+    _:        str = Depends(get_api_key_specialist),
+):
+    """إضافة أو تحديث تشكيل مخصص لكلمة (مثل: يسرها → يِسَرْها)."""
+    word, tashkeel = word.strip(), tashkeel.strip()
+    if not word:     raise HTTPException(400, "الكلمة فارغة")
+    if not tashkeel: raise HTTPException(400, "التشكيل فارغ")
+    if len(word) > 100: raise HTTPException(400, "الكلمة طويلة جداً")
+    cfg = add_tashkeel_override(word, tashkeel)
+    return success({**cfg, "added": {"word": word, "tashkeel": tashkeel}})
+
+
+@router.post("/tashkeel/override/remove")
+def delete_override(
+    word: str = Form(..., description="الكلمة المراد حذف تشكيلها المخصص"),
+    _:    str = Depends(get_api_key_specialist),
+):
+    """حذف تشكيل مخصص."""
+    cfg = remove_tashkeel_override(word.strip())
+    return success({**cfg, "removed": word})
+
+
+@router.post("/tashkeel/protected")
+def upsert_protected(
+    word: str = Form(..., description="الكلمة المراد حمايتها من أي تشكيل"),
+    _:    str = Depends(get_api_key_specialist),
+):
+    """إضافة كلمة تمرّ بدون أي تشكيل (مصطلحات أجنبية، أسماء برامج...)."""
+    word = word.strip()
+    if not word:       raise HTTPException(400, "الكلمة فارغة")
+    if len(word) > 100: raise HTTPException(400, "الكلمة طويلة جداً")
+    cfg = add_tashkeel_protected(word)
+    return success({**cfg, "added": word})
+
+
+@router.post("/tashkeel/protected/remove")
+def delete_protected(
+    word: str = Form(..., description="الكلمة المراد إزالة حمايتها"),
+    _:    str = Depends(get_api_key_specialist),
+):
+    """حذف كلمة من القائمة المحمية."""
+    cfg = remove_tashkeel_protected(word.strip())
+    return success({**cfg, "removed": word})
+
+
+@router.post("/tashkeel/preview")
+def preview_tashkeel(
+    text: str = Form(..., description="النص المراد معاينة تشكيله"),
+    _:    str = Depends(get_api_key_specialist),
+):
+    """معاينة نتيجة التشكيل التلقائي على نص معيّن."""
+    if not text.strip():
+        raise HTTPException(400, "النص فارغ")
+    result = smart_tashkeel(text)
+    return success({"original": text, "tashkeeled": result, "changed": text != result})
+
+
 # ── Voice Chat (STT → LLM → TTS) ─────────────────────────────────────────────
 
 @router.post("/ask")
@@ -463,7 +539,7 @@ async def voice_ask(
     يُستخدَم من لوحة التحكم أو من System 2.
     """
     from app.services.ollama_client import OllamaClient
-    from app.core.prompts import build_system_prompt
+    from app.core.prompts import build_system_prompt, detect_language
 
     spec = _get_voice_specialist(db)
     client = OllamaClient()
@@ -474,8 +550,10 @@ async def voice_ask(
     except Exception:
         core_model = settings.CORE_MODEL
 
+    intro = (spec.config_json or {}).get("intro_text")
+    lang = detect_language(message)
     messages = [
-        {"role": "system", "content": build_system_prompt(spec.system_prompt or "أنت مساعد صوتي ذكي من يسرها.")},
+        {"role": "system", "content": build_system_prompt(spec.system_prompt or "أنت مساعد صوتي ذكي من يسرها.", intro_text=intro, detected_lang=lang)},
         {"role": "user",   "content": message},
     ]
 
@@ -494,18 +572,28 @@ async def voice_ask(
         })
 
     try:
+        cfg = spec.config_json or {}
+        effective_speed   = float(cfg.get("voice_speed", 1.0))
+        effective_dialect = cfg.get("dialect", "ar-SA")
+        effective_gender  = cfg.get("gender", "female")
         speaker_wav = get_voice_sample(spec.name) if use_cloned_voice else None
+
         audio_bytes = synthesize_speech(
             text=response_text,
             language=language,
+            dialect=effective_dialect,
+            gender=effective_gender,
             speaker_wav_bytes=speaker_wav,
+            speed=effective_speed,
         )
         return Response(
             content=audio_bytes,
             media_type="audio/wav",
             headers={
-                "X-Response-Text": response_text[:200],
+                "Content-Disposition": "attachment; filename=yesarha_voice.wav",
                 "X-Language": language,
+                "X-Text-Length": str(len(response_text)),
+                "X-Speed": str(effective_speed),
             }
         )
     except RuntimeError:

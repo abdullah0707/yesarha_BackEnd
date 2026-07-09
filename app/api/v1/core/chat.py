@@ -48,6 +48,7 @@ class SpecialistChatRequest(BaseModel):
     specialist_name: str
     history: Optional[list[dict]] = None
     stream: bool = True
+    images: Optional[list[str]] = None  # base64 للصور — يُستخدم مع نماذج multimodal كـ llava
 
 
 def _get_client() -> OllamaClient:
@@ -297,15 +298,46 @@ async def specialist_chat(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
 
-    client = _get_client()
-    messages = [{"role": "system", "content": specialist.system_prompt or ""}]
-    if payload.history:
-        messages.extend(payload.history)
-    messages.append({"role": "user", "content": payload.message})
+    from app.core.prompts import build_system_prompt, detect_language, is_identity_question
 
-    result = client.chat(model=specialist.base_model or runtime_cfg.get_core_model(), messages=messages)
+    cfg = specialist.config_json or {}
+    intro = cfg.get("intro_text") or f"أنا {specialist.display_name}، مساعد متخصص من يسرها."
+
     specialist.total_requests = (specialist.total_requests or 0) + 1
     db.commit()
+
+    # سؤال الهوية → ردّ مباشر بدون استدعاء النموذج
+    if is_identity_question(payload.message):
+        return success({
+            "content": intro,
+            "specialist": specialist.display_name,
+            "model": specialist.base_model,
+            "tokens_input": 0,
+            "tokens_output": 0,
+            "latency_ms": 0,
+        })
+
+    client = _get_client()
+    lang = detect_language(payload.message)
+    system_prompt = build_system_prompt(
+        specialist.system_prompt or "",
+        intro_text=intro,
+        detected_lang=lang,
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if payload.history:
+        messages.extend(payload.history)
+    user_msg: dict = {"role": "user", "content": payload.message}
+    if payload.images:
+        user_msg["images"] = payload.images
+    messages.append(user_msg)
+
+    result = client.chat(
+        model=specialist.base_model or runtime_cfg.get_core_model(),
+        messages=messages,
+        think=False,
+    )
 
     return success({
         "content": result["content"],
@@ -318,19 +350,45 @@ async def specialist_chat(
 
 
 async def _stream_specialist(payload, specialist, db: Session, admin: Admin):
+    from app.core.prompts import build_system_prompt, detect_language, is_identity_question
+
+    cfg = specialist.config_json or {}
+    intro = cfg.get("intro_text") or f"أنا {specialist.display_name}، مساعد متخصص من يسرها."
+
+    yield _sse({"type": "specialist_info", "name": specialist.display_name, "model": specialist.base_model})
+
+    # سؤال الهوية → ردّ مباشر بدون استدعاء النموذج (يمنع تسريب system prompt)
+    if is_identity_question(payload.message):
+        specialist.total_requests = (specialist.total_requests or 0) + 1
+        db.commit()
+        yield _sse({"type": "token", "content": intro})
+        yield _sse({"type": "done", "full_response": intro})
+        yield "data: [DONE]\n\n"
+        return
+
     client = _get_client()
-    messages = [{"role": "system", "content": specialist.system_prompt or ""}]
+    lang = detect_language(payload.message)
+    system_prompt = build_system_prompt(
+        specialist.system_prompt or "",
+        intro_text=intro,
+        detected_lang=lang,
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
     if payload.history:
         messages.extend(payload.history)
-    messages.append({"role": "user", "content": payload.message})
+    user_msg: dict = {"role": "user", "content": payload.message}
+    if payload.images:
+        user_msg["images"] = payload.images
+    messages.append(user_msg)
 
     full_response = ""
-    yield _sse({"type": "specialist_info", "name": specialist.display_name, "model": specialist.base_model})
 
     async for chunk in sync_gen_to_async(
         client.chat_stream,
         model=specialist.base_model or runtime_cfg.get_core_model(),
-        messages=messages
+        messages=messages,
+        think=False,
     ):
         if chunk["type"] == "token":
             full_response += chunk["content"]

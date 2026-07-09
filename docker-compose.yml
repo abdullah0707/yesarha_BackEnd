@@ -27,6 +27,9 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
+    environment:
+      # يحرر VRAM فوراً بعد كل request — ضروري لمشاركة GPU مع Stable Diffusion
+      OLLAMA_KEEP_ALIVE: "0"
     deploy:
       resources:
         reservations:
@@ -71,6 +74,7 @@ services:
       context: .
       args:
         VOICE_INSTALL: ${VOICE_INSTALL:-false}
+        COSYVOICE_INSTALL: ${COSYVOICE_INSTALL:-false}
     container_name: yesarha_backend
     depends_on:
       postgres:
@@ -91,9 +95,12 @@ services:
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
       CORS_ORIGINS: '["*"]'
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      VRAM_TOTAL_GB: ${VRAM_TOTAL_GB:-7.0}
       XTTS_MODEL_PATH: /app/data/xtts
       COQUI_TOS_AGREED: "1"
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      SD_BASE_URL: http://stable-diffusion:7860
+      SD_ENABLED: "true"
     ports:
       - "8000:8000"
     volumes:
@@ -111,6 +118,28 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  # ── Stable Diffusion (Image Generation) ──────────────────────────
+  stable-diffusion:
+    build:
+      context: ./sd_service
+    container_name: yesarha_sd
+    ports:
+      - "7860:7860"
+    volumes:
+      - sd_hf_cache:/hf_cache
+    environment:
+      SD_MODEL_ID: Lykon/dreamshaper-7
+      HF_HOME: /hf_cache
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   ollama_data:
@@ -118,3 +147,4 @@ volumes:
   voice_models:
   tts_cache:
   hf_cache:
+  sd_hf_cache:
