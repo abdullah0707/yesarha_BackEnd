@@ -5,5 +5,5 @@ transformers==4.44.2
 accelerate==0.34.2
 torch==2.4.0
 safetensors==0.4.5
-Pillow==10.4.0
+Pillow==12.3.0
 xformers==0.0.27.post2
