@@ -1,7 +1,7 @@
 fastapi==0.115.0
 uvicorn==0.30.6
 diffusers==0.30.3
-transformers==4.44.2
+transformers==5.10.1
 accelerate==0.34.2
 torch==2.4.0
 safetensors==0.4.5

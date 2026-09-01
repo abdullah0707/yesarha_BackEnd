@@ -3,7 +3,7 @@
 #
 # لتثبيت يدوي سريع داخل Container:
 #   docker exec yesarha_backend pip install torch==2.11.0+cu130 torchaudio==2.11.0+cu130 --extra-index-url https://download.pytorch.org/whl/cu130
-#   docker exec yesarha_backend pip install soundfile openai-whisper transformers==4.41.2 TTS
+#   docker exec yesarha_backend pip install soundfile openai-whisper transformers==5.10.1 TTS
 #   docker exec yesarha_backend pip install noisereduce librosa
 #
 # أو عبر Docker build (دائم):
@@ -28,7 +28,7 @@ openai-whisper
 
 # 6. Coqui TTS — يشمل XTTS-v2 متعدد اللغات
 #    transformers 5.x حذفت BeamSearchScorer المطلوبة من TTS — نثبّت نسخة متوافقة أولاً
-transformers==4.41.2
+transformers==5.10.1
 TTS
 
 # 7. Edge-TTS — Microsoft Neural TTS عبر الإنترنت (المحرك الأساسي للصوت العربي)
